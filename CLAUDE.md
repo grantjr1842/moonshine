@@ -141,7 +141,7 @@ For non-Latin languages (everything except English and Spanish), set `max_tokens
 
 ## Caching, asset path, and resource locations
 
-- `python/src/moonshine_voice/assets/` ships model files checked into the repo (so the published wheel can be used offline for tiny/base) and `beckett.txt` / `beckett.wav` reference fixtures.
+- `python/src/moonshine_voice/assets/` ships `tiny-en/` (decoder/encoder/tokenizer) so the published wheel can transcribe offline out-of-the-box, plus the bundled `beckett.wav`, `error.wav`, `success.wav`, `two_cities.wav` audio fixtures and a prebuilt `cached_embeddings.tsv`. Other model sizes (base, small-streaming, medium-streaming) are downloaded on demand into `MOONSHINE_VOICE_CACHE` via `python -m moonshine_voice.download --stt`.
 - `test-assets/` is the working dir for `scripts/test-core.sh` — tests `cd` here before running. Models live in `tiny-en/`, `tiny-streaming-en/`, plus `two_cities.wav`, `beckett.wav`, `intent.wav`, `speaker-embedding-model.ort`, `spelling_cnn.ort`, `spelling_cnn_meta.json`.
 - `core/third-party/onnxruntime/lib/{linux,macos,windows,ios,android}/` is the vendored prebuilt ORT for every supported platform. The `find-ort-library-path.cmake` module picks the right one.
 
