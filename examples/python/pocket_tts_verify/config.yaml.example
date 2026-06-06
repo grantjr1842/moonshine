@@ -1,0 +1,65 @@
+# PocketTTS round-trip verification — example config.
+#
+# Every field has a sensible default. The flags on the command line
+# override the values here; this file is just for pinning the common
+# case so you can re-run the same evaluation without retyping flags.
+
+# PocketTTS settings.
+pocket_tts:
+  # PocketTTS language code. One of: english_2026-01, english_2026-04,
+  # english (alias for english_2026-04), french_24l, german_24l,
+  # portuguese_24l, italian_24l, spanish_24l.
+  language: "english_2026-04"
+
+  # Voice name (built-in: alba, marius, etc) or path to a .safetensors
+  # file produced by `pocket-tts export-voice`.
+  voice: "alba"
+
+  # Sampling temperature for the FlowLM acoustic LM. Higher = more
+  # varied prosody, lower = more deterministic.
+  temperature: 0.7
+  lsd_decode_steps: 1
+  eos_threshold: -4.0
+
+# Moonshine STT settings.
+moonshine:
+  language: "en"
+  # Model architecture constant. See moonshine_voice.ModelArch.
+  # 0 = TINY, 1 = BASE, 2 = TINY_STREAMING, …  Leave as null to
+  # auto-pick the best available for the language.
+  model_arch: 1
+  options:
+    vad_threshold: 0.5
+    max_tokens_per_second: 6.5
+    identify_speakers: false
+    return_audio_data: false
+    # Set to true to also dump input audio to a WAV for debugging
+    # (this is a per-stream option, applied to the batch path here).
+    save_input_wav_path: ""
+
+# Corpus: what sentences to evaluate against.
+corpus:
+  # Either a built-in name (":smoke:" loads corpora/english_smoke.txt)
+  # or a path to a plain-text file (one sentence per line, # comments
+  # are ignored).
+  source: ":smoke:"
+  # Optional cap on the number of sentences evaluated.
+  limit: null
+  # Skip rows where the TTS produced no audio (rare, but can happen
+  # with degenerate voice references).
+  skip_empty_audio: true
+
+# Output: what to write, where.
+output:
+  directory: "./pocket_tts_verify_report"
+  # Save the synthesized wav for each sentence (handy for manual
+  # listening and debugging).
+  write_wav: true
+  write_csv: true
+  write_json: true
+  write_markdown: true
+  # WER threshold for the per-sentence pass/fail column. 0.15 = 15%
+  # WER, which is roughly the intelligibility floor for TTS output
+  # in informal testing.
+  wer_pass_threshold: 0.15
+  # Markdown report is also printed to stdout if quiet=false on the CLI.

@@ -1,0 +1,39 @@
+# PocketTTS round-trip smoke corpus — 30 short English sentences.
+#
+# One sentence per line. Lines starting with "#" are comments and
+# ignored. The list is intentionally small so the smoke test
+# finishes in under a minute on CPU. For statistically meaningful
+# WER estimates, point --corpus at a larger text file (e.g. 500+
+# sentences from librispeech or your own application-domain
+# sentences).
+
+Hello, world.
+The quick brown fox jumps over the lazy dog.
+How are you today?
+I am fine, thank you.
+What time is it?
+It is half past three.
+My name is Jane Smith.
+I live in San Francisco.
+The weather is nice today.
+Please open the window.
+Close the door behind you.
+I would like a cup of coffee.
+The meeting is at ten o'clock.
+Thank you for your help.
+I will see you tomorrow.
+Have a good evening.
+The train leaves at six.
+She sells seashells by the seashore.
+Peter Piper picked a peck of pickled peppers.
+How much wood would a woodchuck chuck?
+There are three hundred and sixty five days in a year.
+The speed of light is approximately three hundred thousand kilometers per second.
+Please call me back when you have a moment.
+I love programming in Python.
+The capital of France is Paris.
+Mount Everest is the tallest mountain in the world.
+Could you repeat that, please?
+I do not understand.
+Yes, that is correct.
+Goodbye.
