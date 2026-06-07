@@ -24,6 +24,7 @@ imports from the examples, so the dependency graph stays a clean tree.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,7 +55,17 @@ _TEST_ASSETS_DIR = Path(__file__).resolve().parents[3] / "test-assets"
 
 
 def default_wav_path() -> Path:
-    """Path to the bundled ``two_cities.wav`` used by the offline demos."""
+    """Path to the bundled ``two_cities.wav`` used by the offline demos.
+
+    Honours ``MOONSHINE_TEST_ASSETS_DIR`` first so the smoke-test
+    driver can point us at a custom location. The hard-coded
+    fallback assumes the canonical dev-checkout layout
+    (``examples/python/stt/common.py`` → 3 parents up → repo root
+    → ``test-assets/``) which doesn't survive a ``pip install``.
+    """
+    env_dir = os.environ.get("MOONSHINE_TEST_ASSETS_DIR")
+    if env_dir:
+        return Path(env_dir) / "two_cities.wav"
     return _TEST_ASSETS_DIR / "two_cities.wav"
 
 
@@ -94,16 +105,32 @@ def make_argparser(
     *,
     include_mic: bool = False,
     include_embedding: bool = False,
+    include_self_check: bool = False,
 ) -> argparse.ArgumentParser:
     """Build a standard argparse for the example scripts.
 
     The returned parser pre-defines the flags most examples need. Examples
     can call ``parser.add_argument(...)`` to add their own.
+
+    Set ``include_self_check=True`` to add the ``--self-check`` flag
+    used by the smoke-test driver
+    (``scripts/test-python-examples.sh``).
     """
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    if include_self_check:
+        parser.add_argument(
+            "--self-check",
+            action="store_true",
+            help=(
+                "Run a short canned-audio smoke test instead of the "
+                "normal interactive flow. Emits a final "
+                "``PASS:`` / ``FAIL:`` / ``SKIP:`` line and exits "
+                "0 / 1 / 77. Used by the example smoke-test driver."
+            ),
+        )
     parser.add_argument(
         "--language",
         type=str,
@@ -451,3 +478,68 @@ def first_n(iterable: Iterable, n: int) -> List:
         except StopIteration:
             break
     return out
+
+
+# ---------------------------------------------------------------------------
+# Self-check wrapper
+# ---------------------------------------------------------------------------
+
+
+def run_self_check(
+    name: str,
+    body,
+    *,
+    skip_predicate=None,
+):
+    """Run ``body`` under the ``--self-check`` contract.
+
+    Each example's ``main()`` follows the same pattern when
+    ``--self-check`` is on::
+
+        if args.self_check:
+            return common.run_self_check("01_offline_transcribe", self_check_main)
+
+    ``body`` is a callable that returns either ``None`` (PASS) or
+    a :class:`SelfCheckResult` (e.g. FAIL on assertion, SKIP on
+    missing dependency). The wrapper handles the try/except +
+    SystemExit dance so each example stays three lines long.
+
+    ``skip_predicate``, if given, is called at the top with no
+    arguments; if it returns a string, that string is used as the
+    SKIP reason. Useful for ``try_get_spelling_model()``-style
+    guards: ``skip_predicate=lambda: skip_reason_if_no_spelling_model``.
+    """
+    from test_support.self_check import SelfCheckResult, report
+
+    if skip_predicate is not None:
+        reason = skip_predicate()
+        if reason:
+            report(SelfCheckResult.skip(reason, name))
+            return  # unreachable; report() exits
+
+    try:
+        result = body()
+    except SystemExit:
+        raise  # never swallow the report() exit
+    except Exception as e:
+        # When MOONSHINE_SELF_CHECK_VERBOSE=1 is set, also print the
+        # full traceback to stderr before the FAIL line. Useful for
+        # diagnosing which exact line in the example triggered the
+        # failure — common when the smoke test catches a real bug.
+        import traceback as _tb
+        if os.environ.get("MOONSHINE_SELF_CHECK_VERBOSE") == "1":
+            print(_tb.format_exc(), file=sys.stderr)
+        report(SelfCheckResult.fail(repr(e), name))
+        return  # unreachable
+
+    if result is None:
+        result = SelfCheckResult.pass_(name)
+    if not isinstance(result, SelfCheckResult):
+        # ``body`` returned True / False / a string — coerce.
+        if isinstance(result, str):
+            result = SelfCheckResult.fail(result, name)
+        elif result is False:
+            result = SelfCheckResult.fail("body returned False", name)
+        else:
+            result = SelfCheckResult.pass_(name)
+    report(result)

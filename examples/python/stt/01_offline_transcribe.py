@@ -88,9 +88,17 @@ def transcribe(wav_path, *, language: str = "en", show_words: bool = False):
 def main() -> None:
     parser = common.make_argparser(
         description="One-shot transcription of a WAV file. No microphone "
-        "involved; runs anywhere."
+        "involved; runs anywhere.",
+        include_self_check=True,
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        common.run_self_check(
+            "01_offline_transcribe",
+            lambda: _self_check(args),
+        )
+        return
 
     wav_path = common.require_wav_path(args.wav_path)
     transcribe(
@@ -98,6 +106,38 @@ def main() -> None:
         language=args.language,
         show_words=args.word_timestamps,
     )
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: transcribe two_cities.wav and assert ≥ 1 line.
+
+    Returns ``None`` (PASS) on success or a ``SelfCheckResult`` on
+    failure. The wrapper in :func:`common.run_self_check` handles
+    the rest.
+    """
+    from test_support.self_check import SelfCheckResult
+
+    wav_path = common.default_wav_path()
+    if not wav_path.exists():
+        return SelfCheckResult.skip(
+            f"missing test audio: {wav_path}", "01_offline_transcribe"
+        )
+    transcript = transcribe(
+        wav_path,
+        language=args.language,
+        show_words=False,
+    )
+    if not transcript.lines:
+        return SelfCheckResult.fail(
+            "transcribe_without_streaming returned no lines",
+            "01_offline_transcribe",
+        )
+    if not any(line.text.strip() for line in transcript.lines):
+        return SelfCheckResult.fail(
+            "all transcript lines were empty",
+            "01_offline_transcribe",
+        )
+    return None  # PASS
 
 
 if __name__ == "__main__":

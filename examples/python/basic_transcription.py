@@ -57,7 +57,7 @@ def transcribe_with_streaming(
     transcriber.stop()
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Basic transcription example")
     parser.add_argument(
         "--language", type=str, default="en", help="Language to use for transcription"
@@ -68,10 +68,19 @@ if __name__ == "__main__":
         default=None,
         help="Model architecture to use for transcription",
     )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run the canned-audio smoke test and exit with PASS/FAIL/SKIP.",
+    )
     # or nargs='+' to require at least one
     parser.add_argument("input_files", nargs="*")
 
     args = parser.parse_args()
+
+    if args.self_check:
+        return _self_check(args)
+
     if len(args.input_files) == 0:
         input_files = [os.path.join(get_assets_path(), "two_cities.wav")]
     else:
@@ -88,3 +97,37 @@ if __name__ == "__main__":
         print("*" * 80)
         print(f"Transcribing {input_file} with streaming...")
         transcribe_with_streaming(transcriber, audio_data, sample_rate)
+
+
+def _self_check(args):
+    """Smoke test: transcribe the bundled WAV and assert ≥ 1 line."""
+    from test_support.self_check import SelfCheckResult, report
+
+    wav_path = os.path.join(get_assets_path(), "two_cities.wav")
+    if not os.path.exists(wav_path):
+        report(SelfCheckResult.skip(f"missing {wav_path}", "basic_transcription"))
+
+    model_path, model_arch = get_model_for_language(
+        args.language, args.model_arch
+    )
+    transcriber = Transcriber(model_path=model_path, model_arch=model_arch)
+    try:
+        audio_data, sample_rate = load_wav_file(wav_path)
+        transcript = transcriber.transcribe_without_streaming(
+            audio_data, sample_rate=sample_rate, flags=0
+        )
+        if not transcript.lines:
+            report(SelfCheckResult.fail(
+                "no lines returned", "basic_transcription"
+            ))
+        if not any(line.text.strip() for line in transcript.lines):
+            report(SelfCheckResult.fail(
+                "all transcript lines were empty", "basic_transcription"
+            ))
+        report(SelfCheckResult.pass_("basic_transcription"))
+    finally:
+        transcriber.close()
+
+
+if __name__ == "__main__":
+    main()

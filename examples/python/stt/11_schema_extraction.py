@@ -315,7 +315,8 @@ class _FakeLine:
 def main() -> None:
     parser = common.make_argparser(
         description="Schema-based extraction of structured data from "
-        "completed transcript lines."
+        "completed transcript lines.",
+        include_self_check=True,
     )
     parser.add_argument(
         "--use-llm",
@@ -342,9 +343,43 @@ def main() -> None:
         help="Which extractor to use in the demo (overrides --use-llm).",
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        common.run_self_check(
+            "11_schema_extraction",
+            lambda: _self_check(args),
+        )
+        return
+
     if args.extractor == "llm":
         args.use_llm = True
     run_demo(args)
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: drive the canned-utterance extractor path.
+
+    The regex extractor is the only wired-up path — the LLM stub
+    short-circuits to regex under all backends, so the self-check
+    exercises the regex logic directly. Asserts ≥ 1 record with
+    an email, phone, or intent set.
+    """
+    from test_support.self_check import SelfCheckResult
+
+    listener = SchemaExtractor(extractor=extract_with_regex)
+    for u in CANNED_UTTERANCES:
+        fake_event = LineCompleted(
+            line=_FakeLine(text=u),
+            stream_handle=0,
+        )
+        listener.on_line_completed(fake_event)
+
+    if not listener.extracted:
+        return SelfCheckResult.fail(
+            "no records extracted from canned utterances",
+            "11_schema_extraction",
+        )
+    return None  # PASS
 
 
 if __name__ == "__main__":

@@ -16,6 +16,15 @@ Three ways to run it:
   pre-defined list of utterances, useful for smoke tests.
 """
 
+# Install the fake sounddevice shim BEFORE any ``moonshine_voice``
+# import. The MicTranscriber module binds ``import sounddevice as
+# sd`` at module scope, so the fake has to be in place before that
+# import fires. No-op when ``MOONSHINE_SELF_CHECK`` isn't set.
+try:
+    from test_support import _auto_install  # noqa: F401
+except Exception:
+    pass
+
 import argparse
 import sys
 import time
@@ -415,6 +424,12 @@ def main() -> None:
     parser.add_argument("--quantization", default="q4")
     parser.add_argument("--threshold", type=float, default=0.7)
     parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run the canned-utterance scripted flow and exit "
+        "with PASS/FAIL/SKIP.",
+    )
+    parser.add_argument(
         "--no-tts",
         action="store_true",
         help="Under --mic, print prompts instead of speaking them.",
@@ -517,7 +532,51 @@ def main() -> None:
         args.tts_options = {}
 
     if args.mic:
-        run_live(args)
+        if args.self_check:
+            # Skip mic mode under self-check — it needs real
+            # audio hardware. Use the scripted path instead.
+            args.mic = False
+            args.scripted = True
+        else:
+            run_live(args)
+            return
+
+    if args.self_check:
+        # self-check without --mic: default to the scripted path.
+        args.scripted = True
+        from test_support.self_check import SelfCheckResult, report
+        try:
+            canned = {
+                "wifi": [
+                    "HomeWifi", "yes", "s e c r e t 1 2 3", "done", "yes", "yes",
+                ],
+                "onboard": [
+                    "HomeWifi", "yes", "s w o r d f i s h", "done", "no", "yes",
+                    "America Los Angeles", "yes",
+                ],
+                "timezone": ["America New York", "yes"],
+            }
+            run_scripted(
+                args.flow,
+                canned[args.flow],
+                embedding_model=args.embedding_model,
+                quantization=args.quantization,
+                debug=args.debug,
+            )
+        except SystemExit:
+            raise
+        except Exception as e:
+            report(SelfCheckResult.fail(
+                f"{type(e).__name__}: {e}",
+                "dialog_flow",
+            ))
+        report(SelfCheckResult.pass_("dialog_flow"))
+        return  # report() exits; this is a defensive return
+
+    if args.mic:
+        # Already handled above under self-check; this is the
+        # non-self-check mic path.
+        pass
     elif args.scripted:
         canned = {
             "wifi": [
@@ -543,6 +602,8 @@ def main() -> None:
             quantization=args.quantization,
             debug=args.debug,
         )
+        return  # run_interactive blocks until EOF/Ctrl+C; we
+                # reach here only if it returned cleanly.
 
 
 if __name__ == "__main__":

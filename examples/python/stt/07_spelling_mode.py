@@ -38,6 +38,8 @@ Run it
 
 from __future__ import annotations
 
+import time
+
 from moonshine_voice import AlphanumericEvent, AlphanumericEventType
 
 from . import common
@@ -107,8 +109,17 @@ def main() -> None:
         description="Demonstrate alphanumeric / spelling mode for "
         "password and code input.",
         include_mic=True,
+        include_self_check=True,
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        args.mic = True  # force mic mode under self-check
+        common.run_self_check(
+            "07_spelling_mode",
+            lambda: _self_check(args),
+        )
+        return
 
     spelling_path = try_get_spelling_model(args.language)
     if spelling_path:
@@ -186,6 +197,72 @@ def main() -> None:
                     transcriber.pop_listener()
 
     transcriber.close()
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: drive spelling-mode mic and assert CNN fusion
+    produced at least one CHARACTER event.
+
+    This is the test case for the bug the 9-angle review found:
+    the spelling CNN is silently dropped on the mic path when
+    ``spelling_model_path=`` isn't forwarded. We force a fresh
+    ``MicTranscriber`` with the spelling flag set AND the
+    spelling model path passed, and assert the assembled
+    string grew.
+    """
+    from test_support.self_check import SelfCheckResult
+    from moonshine_voice import (
+        AlphanumericEvent,
+        AlphanumericEventType,
+        AlphanumericListener,
+        MicTranscriber,
+    )
+    from moonshine_voice.transcriber import MOONSHINE_FLAG_SPELLING_MODE
+
+    spelling_path = try_get_spelling_model(args.language)
+    if not spelling_path:
+        return SelfCheckResult.skip(
+            "spelling model not available — cannot exercise "
+            "CNN-fusion path",
+            "07_spelling_mode",
+        )
+
+    transcriber, arch = common.load_stt_model(
+        language=args.language,
+        spelling_model_path=spelling_path,
+    )
+    try:
+        assembled: list = []
+
+        def on_event(event: AlphanumericEvent) -> None:
+            if event.type is AlphanumericEventType.CHARACTER:
+                assembled.append(event.character or "")
+
+        mic = MicTranscriber(
+            model_path=transcriber._model_path,
+            model_arch=arch,
+            samplerate=16000,
+            transcribe_flags=MOONSHINE_FLAG_SPELLING_MODE,
+            spelling_model_path=spelling_path,
+        )
+        mic.add_listener(AlphanumericListener(on_event))
+        mic.start()
+        try:
+            time.sleep(10.0)
+        finally:
+            mic.stop()
+            mic.close()
+
+        if not assembled:
+            return SelfCheckResult.fail(
+                "spelling CNN produced no CHARACTER events in 10 s of "
+                "fake-mic audio — bug: spelling_model_path not "
+                "forwarded to MicTranscriber?",
+                "07_spelling_mode",
+            )
+        return None  # PASS
+    finally:
+        transcriber.close()
 
 
 if __name__ == "__main__":

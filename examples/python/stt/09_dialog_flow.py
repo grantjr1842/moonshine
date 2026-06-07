@@ -159,6 +159,7 @@ def main() -> None:
     parser = common.make_argparser(
         description="Multi-turn dialog flow in keyboard mode (no audio).",
         include_embedding=True,
+        include_self_check=True,
     )
     parser.add_argument(
         "--flow",
@@ -167,6 +168,13 @@ def main() -> None:
         help="Which flow to run.",
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        common.run_self_check(
+            "09_dialog_flow",
+            lambda: _self_check(args),
+        )
+        return
 
     common.hr("Loading embedding model")
     from moonshine_voice import get_embedding_model
@@ -183,6 +191,91 @@ def main() -> None:
     )
     try:
         run_keyboard(recognizer, args.flow)
+    finally:
+        recognizer.close()
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: drive a canned dialog flow with stubbed input().
+
+    Uses :func:`test_support.self_check.patch_builtins_input` to
+    feed the runner a list of canned replies, so the example runs
+    end-to-end without a real keyboard. Asserts the runner exits
+    the active flow (i.e. ``runner.is_active`` is False at the
+    end).
+    """
+    from test_support.self_check import SelfCheckResult, patch_builtins_input
+    from moonshine_voice import DialogFlow, IntentRecognizer, get_embedding_model
+
+    # Per-flow canned replies. Each list drives ``run_keyboard``'s
+    # ``input()`` loop until ``runner.is_active`` becomes False.
+    canned_replies = {
+        "order-pizza": [
+            "small", "margherita", "yes",
+        ],
+        "wifi": [
+            "HomeWifi", "yes", "s e c r e t 1 2 3", "done", "yes", "yes",
+        ],
+        "list": ["dark", "yes"],
+    }
+    patch_builtins_input(canned_replies.get(args.flow, []))
+
+    try:
+        emb_path, emb_arch = get_embedding_model(
+            args.embedding_model, args.quantization
+        )
+    except Exception as e:
+        return SelfCheckResult.skip(
+            f"embedding model unavailable: {e!r}",
+            "09_dialog_flow",
+        )
+    recognizer = IntentRecognizer(
+        model_path=emb_path,
+        model_arch=emb_arch,
+        model_variant=args.quantization,
+        threshold=args.threshold,
+    )
+    try:
+        # Replicate the body of run_keyboard but capture the
+        # runner so we can inspect ``is_active`` at the end.
+        # The flow functions are defined at module scope; access
+        # them via globals() rather than an import (the module
+        # filename starts with a digit so import-by-name is
+        # awkward).
+        g = globals()
+        runner = DialogFlow(
+            speak_fn=lambda text: None,  # swallow the prompts
+            intent_recognizer=recognizer,
+        )
+        runner.register_flow("order a pizza", g["order_pizza"])
+        runner.register_flow("set the wifi password", g["set_wifi_password"])
+        runner.register_flow("pick a theme", g["pick_from_list"])
+        runner.register_global("cancel", lambda d: d.cancel())
+        runner.register_global("start over", lambda d: d.restart())
+
+        aliases = {
+            "order-pizza": "order a pizza",
+            "wifi": "set the wifi password",
+            "list": "pick a theme",
+        }
+        trigger = aliases.get(args.flow, args.flow)
+        runner.process_utterance(trigger)
+        # Drive replies; bail early if we run out.
+        replies = iter(canned_replies.get(args.flow, []))
+        while runner.is_active:
+            try:
+                reply = next(replies)
+            except StopIteration:
+                break
+            runner.process_utterance(reply)
+
+        if runner.is_active:
+            return SelfCheckResult.fail(
+                "flow did not complete within canned replies "
+                f"({len(canned_replies.get(args.flow, []))} replies consumed)",
+                "09_dialog_flow",
+            )
+        return None  # PASS
     finally:
         recognizer.close()
 

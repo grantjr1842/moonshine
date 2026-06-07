@@ -39,8 +39,19 @@ def main() -> None:
         description="Transcribe live microphone input. Defaults to the "
         "bundled two_cities.wav if --mic is not given.",
         include_mic=True,
+        include_self_check=True,
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        # Force --mic mode under self-check; the fake sounddevice
+        # shim supplies the audio.
+        args.mic = True
+        common.run_self_check(
+            "03_live_microphone",
+            lambda: _self_check(args),
+        )
+        return
 
     common.hr("Loading")
     transcriber, arch = common.load_stt_model(language=args.language)
@@ -99,6 +110,57 @@ def main() -> None:
         common.errprint("  done — replay with --mic for live input.")
 
     transcriber.close()
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: drive MicTranscriber with the fake mic for 10 s.
+
+    The canned audio is 44 s of speech — long enough to fire
+    multiple ``on_line_completed`` events. We bail after 10 s
+    wall-clock to keep the test suite fast. Empirically, the
+    first line completes around t=7 s with the bundled audio.
+    """
+    from test_support.self_check import SelfCheckResult
+    from moonshine_voice import MicTranscriber
+
+    transcriber, arch = common.load_stt_model(language=args.language)
+    counter = _LineCounter()
+    try:
+        mic = MicTranscriber(
+            model_path=transcriber._model_path,
+            model_arch=arch,
+            samplerate=args.samplerate,
+        )
+        mic.add_listener(counter)
+        mic.start()
+        try:
+            time.sleep(10.0)
+        finally:
+            mic.stop()
+            mic.close()
+        if counter.completed < 1:
+            return SelfCheckResult.fail(
+                f"no on_line_completed events in 10 s of fake-mic audio "
+                f"(started={counter.started})",
+                "03_live_microphone",
+            )
+        return None  # PASS
+    finally:
+        transcriber.close()
+
+
+class _LineCounter(common.TranscriptEventListener):
+    """Counts line-completion events for the self-check assertion."""
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.completed = 0
+
+    def on_line_started(self, event) -> None:
+        self.started += 1
+
+    def on_line_completed(self, event) -> None:
+        self.completed += 1
 
 
 if __name__ == "__main__":

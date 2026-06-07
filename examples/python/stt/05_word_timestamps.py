@@ -57,10 +57,18 @@ def render_word_timeline(words, total_duration: float, width: int = 40) -> None:
 def main() -> None:
     parser = common.make_argparser(
         description="Stream a WAV and dump per-word timing for each line.",
+        include_self_check=True,
     )
     # Word timestamps are required for this example, so flip the flag on
     # unconditionally regardless of what the user passed.
     args = parser.parse_args()
+
+    if args.self_check:
+        common.run_self_check(
+            "05_word_timestamps",
+            lambda: _self_check(args),
+        )
+        return
 
     options = {
         "word_timestamps": "true",
@@ -117,6 +125,51 @@ def main() -> None:
         render_word_timeline(line.words, line.duration)
     if not any_rendered:
         print("  (every line had empty word list — see Heads-up above)")
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: word-timestamp path produces ≥ 1 line with words.
+
+    The bundled ``tiny-en`` model ships with
+    ``decoder_with_attention.ort``; if the user's chosen model
+    doesn't, the C library returns lines without word data and
+    we SKIP rather than FAIL — the example handles that case
+    explicitly in the regular path.
+    """
+    from test_support.self_check import SelfCheckResult
+
+    wav_path = common.default_wav_path()
+    if not wav_path.exists():
+        return SelfCheckResult.skip(
+            f"missing test audio: {wav_path}", "05_word_timestamps"
+        )
+    options = {
+        "word_timestamps": "true",
+        "return_audio_data": "false",
+        "identify_speakers": "false",
+    }
+    transcriber, _ = common.load_stt_model(
+        language=args.language, options=options
+    )
+    try:
+        audio, sample_rate = common.load_wav_file(wav_path)
+        transcript = transcriber.transcribe_without_streaming(
+            audio, sample_rate=sample_rate, flags=0
+        )
+    finally:
+        transcriber.close()
+
+    if not transcript.lines:
+        return SelfCheckResult.fail(
+            "no lines returned", "05_word_timestamps"
+        )
+    if not any(line.words for line in transcript.lines):
+        return SelfCheckResult.skip(
+            "model has no attention-decoder variant; "
+            "word timestamps not supported",
+            "05_word_timestamps",
+        )
+    return None  # PASS
 
 
 if __name__ == "__main__":

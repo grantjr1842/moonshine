@@ -122,9 +122,18 @@ def demonstrate_force_update(transcriber) -> None:
 
 def main() -> None:
     parser = common.make_argparser(
-        description="Streaming transcription with an event listener."
+        description="Streaming transcription with an event listener.",
+        include_self_check=True,
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        common.run_self_check(
+            "02_streaming_transcribe",
+            lambda: _self_check(args),
+        )
+        return
+
     wav_path = common.require_wav_path(args.wav_path)
 
     common.hr("Loading")
@@ -165,6 +174,35 @@ def main() -> None:
     print(f"  last text      : {counter.last_text!r}")
 
     transcriber.close()
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: stream two_cities.wav, assert ≥ 1 line completed."""
+    from test_support.self_check import SelfCheckResult
+
+    wav_path = common.default_wav_path()
+    if not wav_path.exists():
+        return SelfCheckResult.skip(
+            f"missing test audio: {wav_path}", "02_streaming_transcribe"
+        )
+    transcriber, _arch = common.load_stt_model(language=args.language)
+    try:
+        counter = LineCounterListener()
+        transcriber.add_listener(counter)
+        transcriber.start()
+        try:
+            audio, sample_rate = common.load_wav_file(wav_path)
+            feed_wav_in_chunks(transcriber, audio, sample_rate)
+        finally:
+            transcriber.stop()
+        if counter.completed < 1:
+            return SelfCheckResult.fail(
+                f"no line.completed events (started={counter.started})",
+                "02_streaming_transcribe",
+            )
+        return None  # PASS
+    finally:
+        transcriber.close()
 
 
 if __name__ == "__main__":

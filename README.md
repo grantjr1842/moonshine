@@ -9,6 +9,8 @@
 - [Using the Library](#using-the-library)
 - [Models](#models)
 - [API Reference](#api-reference)
+- [Examples](#examples)
+- [Running the test suite](#running-the-test-suite)
 - [Support](#support)
 - [Roadmap](#roadmap)
 - [Acknowledgements](#acknowledgements)
@@ -1191,6 +1193,53 @@ IPA string generation without speech synthesis. Dependencies are the same CDN le
   - `options`: Optional per-call native G2P options.
 
 - <a id="graphemetophonemizer-close"></a>`close()`: Frees the native handle; also invoked by context manager exit and `__del__`.
+
+## Running the test suite
+
+The repo ships four driver scripts under `scripts/`. Run them individually
+or via the umbrella:
+
+```bash
+# Everything (umbrella):
+./scripts/test-all-examples.sh
+
+# Or run individual suites:
+./scripts/test-core.sh                   # C++ unit tests (bin-tokenizer, transcriber, VAD, …)
+./scripts/test-python-examples.sh        # Python example self-checks (15 examples + pocket_tts_verify tests)
+./scripts/test-cpp-examples.sh           # examples/c++/transcriber.cpp and text-to-speech.cpp
+./scripts/test-examples.sh --local-examples  # iOS + Android example builds
+```
+
+The Python example self-checks run with a fake `sounddevice` shim
+(`examples/python/test_support/fake_sounddevice.py`) and the canned
+`test-assets/two_cities.wav`, so no real audio hardware is required.
+Each example script gains a `--self-check` flag that runs a short
+smoke test and prints a final `PASS:` / `FAIL:` / `SKIP:` line on
+stdout, with the autotools exit codes (0 / 1 / 77).
+
+The C++ example driver builds against the freshly-built
+`core/build/libmoonshine.so` (run `test-core.sh` first) — no
+release-tarball download is required. The umbrella aggregates pass /
+fail / skip counts across all four sub-suites; its exit code is 0
+only if every sub-suite passed.
+
+Useful environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `SKIP_CORE=1` | Skip `test-core.sh` from the umbrella |
+| `SKIP_PYTHON=1` | Skip `test-python-examples.sh` from the umbrella |
+| `SKIP_CPP_EXAMPLES=1` | Skip `test-cpp-examples.sh` from the umbrella |
+| `SKIP_IOS_ANDROID=1` | Skip `test-examples.sh` from the umbrella |
+| `SKIP_INDIVIDUAL_EXAMPLES=examples.python.stt.06_multi_stream,…` | Skip specific Python examples |
+| `SKIP_POCKET_TTS=1` | Skip the `pocket_tts_verify` unittest suite |
+| `MOONSHINE_SELF_CHECK_VERBOSE=1` | Print full tracebacks on Python self-check failures |
+
+The self-check is also useful for catching regressions in
+the examples themselves — the suite has previously surfaced
+broken imports, dropped command-line flags, and silent option
+forwarding bugs that would otherwise only show up at the
+command line.
 
 ## Support
 

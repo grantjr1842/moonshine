@@ -205,6 +205,7 @@ def main() -> None:
         description="Full voice-agent stack: STT + intent + dialog + TTS.",
         include_mic=True,
         include_embedding=True,
+        include_self_check=True,
     )
     parser.add_argument(
         "--no-tts",
@@ -230,6 +231,18 @@ def main() -> None:
         help="Verify sounddevice / numpy / TTS model are reachable, then exit.",
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        # The full voice agent needs mic + TTS playback. Under
+        # --self-check we use the safest no-hardware path: just
+        # run ``check_prereqs`` to verify the wiring without
+        # actually starting audio.
+        from test_support.self_check import SelfCheckResult, report
+        try:
+            check_prereqs()
+        except Exception as e:
+            report(SelfCheckResult.fail(repr(e), "10_full_voice_agent"))
+        report(SelfCheckResult.pass_("10_full_voice_agent"))
 
     if args.list_output_devices:
         list_output_devices()

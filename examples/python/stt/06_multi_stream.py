@@ -124,7 +124,8 @@ def _decode_transcript(ptr) -> Transcript:
 
 def main() -> None:
     parser = common.make_argparser(
-        description="Two audio sources transcribed on a single Transcriber."
+        description="Two audio sources transcribed on a single Transcriber.",
+        include_self_check=True,
     )
     parser.add_argument(
         "--file-a",
@@ -139,6 +140,13 @@ def main() -> None:
         help="Second audio source. Default: beckett.wav.",
     )
     args = parser.parse_args()
+
+    if args.self_check:
+        common.run_self_check(
+            "06_multi_stream",
+            lambda: _self_check(args),
+        )
+        return
 
     if not args.file_a.exists():
         common.errprint(f"  --file-a not found: {args.file_a}")
@@ -186,6 +194,63 @@ def main() -> None:
     finally:
         lib.moonshine_free_transcriber(transcriber_handle)
         common.errprint("  transcriber freed")
+
+
+def _self_check(args) -> "SelfCheckResult | None":
+    """Smoke test: open two streams, feed two WAVs, assert ≥ 1 line each.
+
+    Does **not** exercise the partial-failure stream-A leak
+    documented in the plan's "Known gaps" — only the happy path.
+    """
+    from test_support.self_check import SelfCheckResult
+
+    # ``TranscriptC`` is not re-exported from the top-level package
+    # in this moonshine_voice version. The example is broken on
+    # import until that's fixed (the same import at the top of this
+    # file would fail). Surface that as a clear FAIL with a hint.
+    if TranscriptC is None:
+        return SelfCheckResult.fail(
+            "moonshine_voice.TranscriptC missing — import from "
+            "moonshine_voice.moonshine_api in this example",
+            "06_multi_stream",
+        )
+
+    if not args.file_a.exists():
+        return SelfCheckResult.skip(
+            f"missing --file-a: {args.file_a}", "06_multi_stream"
+        )
+    if not args.file_b.exists():
+        return SelfCheckResult.skip(
+            f"missing --file-b: {args.file_b}", "06_multi_stream"
+        )
+
+    common.hr("Loading model")
+    model_path, arch = get_model_for_language(args.language, args.model_arch)
+
+    lib = _MoonshineLib().lib
+    model_path_bytes = str(model_path).encode("utf-8")
+    transcriber_handle = lib.moonshine_load_transcriber_from_files(
+        model_path_bytes, int(arch), None, 0, 20000
+    )
+    check_error(transcriber_handle)
+    try:
+        handle_a = open_extra_stream(lib, transcriber_handle)
+        handle_b = open_extra_stream(lib, transcriber_handle)
+        try:
+            ta = feed_stream(lib, transcriber_handle, handle_a, args.file_a)
+            tb = feed_stream(lib, transcriber_handle, handle_b, args.file_b)
+            if not ta.lines or not tb.lines:
+                return SelfCheckResult.fail(
+                    f"empty transcripts (a={len(ta.lines)} lines, "
+                    f"b={len(tb.lines)} lines)",
+                    "06_multi_stream",
+                )
+            return None  # PASS
+        finally:
+            lib.moonshine_free_stream(transcriber_handle, handle_a)
+            lib.moonshine_free_stream(transcriber_handle, handle_b)
+    finally:
+        lib.moonshine_free_transcriber(transcriber_handle)
 
 
 if __name__ == "__main__":

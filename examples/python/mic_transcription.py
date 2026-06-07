@@ -1,5 +1,17 @@
 """Uses the MicTranscriber class to transcribe audio from a microphone."""
 
+# Install the fake sounddevice shim BEFORE any ``moonshine_voice``
+# import. ``moonshine_voice.mic_transcriber`` does
+# ``import sounddevice as sd`` at module scope, so the fake has
+# to be in place before that import fires — otherwise the real
+# PortAudio binding wins and the self-check's fake never sees
+# the MicTranscriber. The installer is a no-op when
+# ``MOONSHINE_SELF_CHECK`` isn't set.
+try:
+    from test_support import _auto_install  # noqa: F401
+except Exception:
+    pass
+
 import argparse
 import sys
 import time
@@ -46,7 +58,7 @@ class FileListener(TranscriptEventListener):
         print(event.line.text)
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Basic transcription example")
     parser.add_argument(
         "--language", type=str, default="en", help="Language to use for transcription"
@@ -57,7 +69,16 @@ if __name__ == "__main__":
         default=None,
         help="Model architecture to use for transcription",
     )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Run the canned-audio smoke test and exit with PASS/FAIL/SKIP.",
+    )
     args = parser.parse_args()
+
+    if args.self_check:
+        return _self_check(args)
+
     model_path, model_arch = get_model_for_language(args.language, args.model_arch)
 
     mic_transcriber = MicTranscriber(model_path=model_path, model_arch=model_arch)
@@ -76,3 +97,47 @@ if __name__ == "__main__":
     finally:
         mic_transcriber.stop()
         mic_transcriber.close()
+
+
+def _self_check(args):
+    """Smoke test: drive MicTranscriber with the fake mic for 10 s."""
+    from test_support.self_check import SelfCheckResult, report
+    from moonshine_voice import TranscriptEventListener
+
+    class _Counter(TranscriptEventListener):
+        def __init__(self):
+            super().__init__()
+            self.completed = 0
+
+        def on_line_completed(self, event) -> None:
+            self.completed += 1
+
+    model_path, model_arch = get_model_for_language(
+        args.language, args.model_arch
+    )
+    mic_transcriber = MicTranscriber(
+        model_path=model_path, model_arch=model_arch, samplerate=16000
+    )
+    counter = _Counter()
+    try:
+        mic_transcriber.add_listener(counter)
+        mic_transcriber.start()
+        try:
+            # 18 s is enough for the first line to complete
+            # (~7-8 s) and gives 2-3 s of headroom. Empirically
+            # the first on_line_completed fires around t=7 s.
+            time.sleep(18.0)
+        finally:
+            mic_transcriber.stop()
+        if counter.completed < 1:
+            report(SelfCheckResult.fail(
+                f"no on_line_completed events in 18 s of fake-mic audio",
+                "mic_transcription",
+            ))
+        report(SelfCheckResult.pass_("mic_transcription"))
+    finally:
+        mic_transcriber.close()
+
+
+if __name__ == "__main__":
+    main()
