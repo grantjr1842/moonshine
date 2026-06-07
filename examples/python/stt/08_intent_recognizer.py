@@ -129,7 +129,12 @@ def register_standard_intents(recognizer: IntentRecognizer) -> None:
     recognizer.register_intent("set a timer", on_timer)
     recognizer.register_intent("play some music", on_music_play)
     recognizer.register_intent("stop the music", on_music_stop)
-    common.errprint(f"  registered {recognizer.intent_count()} intents")
+    # ``intent_count`` is a property (not a method) in this
+    # moonshine_voice version — the C binding exposes it via
+    # ``moonshine_get_intent_count`` behind a @property.
+    # Calling it as ``intent_count()`` raised ``TypeError:
+    # 'int' object is not callable`` at startup.
+    common.errprint(f"  registered {recognizer.intent_count} intents")
 
 
 # ---------------------------------------------------------------------------
@@ -278,12 +283,7 @@ def _self_check(args) -> "SelfCheckResult | None":
             "08_intent_recognizer",
         )
     try:
-        # ``register_standard_intents`` is broken on this code
-        # path — it calls ``recognizer.intent_count()`` but
-        # ``intent_count`` is a property in this version of
-        # ``moonshine_voice``. We register the intents inline
-        # using only the public API.
-        _register_inline(recognizer)
+        register_standard_intents(recognizer)
         ran = run_standalone_demo_and_capture(recognizer)
         if not ran:
             return SelfCheckResult.fail(
@@ -293,26 +293,6 @@ def _self_check(args) -> "SelfCheckResult | None":
         return None  # PASS
     finally:
         recognizer.close()
-
-
-def _register_inline(recognizer: "IntentRecognizer") -> None:
-    """Register the standard intents without going through
-    :func:`register_standard_intents` (which has an ``intent_count()``
-    call that fails because the property is being misused as a
-    method). The same handler stubs are bound — we don't actually
-    run them in the self-check, just count utterances.
-    """
-    # No-op handlers: we just need the intents registered so
-    # process_utterance has something to match against.
-    def _noop(*args, **kwargs):
-        return None
-
-    recognizer.register_intent("turn on the lights", _noop)
-    recognizer.register_intent("turn off the lights", _noop)
-    recognizer.register_intent("what is the weather", _noop)
-    recognizer.register_intent("set a timer", _noop)
-    recognizer.register_intent("play some music", _noop)
-    recognizer.register_intent("stop the music", _noop)
 
 
 def run_standalone_demo_and_capture(recognizer: "IntentRecognizer") -> bool:
