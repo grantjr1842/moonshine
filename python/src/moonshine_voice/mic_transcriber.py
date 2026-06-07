@@ -89,6 +89,17 @@ class MicTranscriber:
             if in_data is not None:
                 # Flatten and convert to float32 if needed
                 audio_data = in_data.astype(np.float32).flatten()
+                # Glitching USB mics / Bluetooth headsets / dropped
+                # packets can produce NaN/inf samples. The C
+                # transcriber doesn't guard against them and will
+                # either crash or emit garbage. Replace any
+                # non-finite sample with silence so a single bad
+                # packet can't kill a session. (This is a common
+                # robustness fix — see e.g. webrtc audio_processing.)
+                if not np.all(np.isfinite(audio_data)):
+                    audio_data = np.where(
+                        np.isfinite(audio_data), audio_data, 0.0
+                    ).astype(np.float32, copy=False)
                 # The Moonshine C API resamples to its internal 16 kHz, so we
                 # pass whatever rate the device is actually capturing at.
                 self.mic_stream.add_audio(audio_data, self._samplerate)

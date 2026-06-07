@@ -110,8 +110,14 @@ def run_live_agent(args) -> None:
         common.errprint(f"  no spelling model: {e!r} (SPELLED mode uses matcher only)")
 
     common.hr("Loading TTS")
+    # ``--output-device`` is parsed by ``make_argparser`` and is
+    # already coerced to an int when the user passed a digit
+    # string (so the resolver picks it up as an index rather than
+    # a name substring). It used to be silently dropped here —
+    # the flag was plumbed but never forwarded to TextToSpeech.
     tts = None if args.no_tts else TextToSpeech(
         language=args.language,
+        output_device=out_device,
         debug=args.debug,
     )
 
