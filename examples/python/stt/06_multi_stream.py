@@ -62,11 +62,31 @@ def feed_stream(
     transcriber_handle: int,
     stream_handle: int,
     wav_path: Path,
+    *,
+    update_interval: float = 0.5,
 ) -> Transcript:
-    """Push audio in 100 ms chunks into a stream and return its final transcript."""
+    """Push audio in 100 ms chunks into a stream and return its final transcript.
+
+    Mirrors the higher-level :meth:`moonshine_voice.Stream.add_audio` cadence:
+    every ``update_interval`` seconds of accumulated audio we call
+    ``moonshine_transcribe_stream`` to give the VAD a chance to finalise
+    segments and emit completed transcript lines. Without this, the VAD
+    only finalises on the very last call (inside ``stop_stream``) and the
+    transcript is effectively empty.
+
+    The intermediate ``moonshine_transcribe_stream`` results are discarded
+    — we only need the *final* transcript at the end. The intermediate
+    calls exist purely to flush the VAD state.
+    """
     audio, sample_rate = load_wav_file(wav_path)
     err = lib.moonshine_start_stream(transcriber_handle, stream_handle)
     check_error(err)
+
+    # Track elapsed stream time the same way ``Stream.add_audio`` does so
+    # the VAD sees periodic flushes instead of one giant flush at the end.
+    stream_time = 0.0
+    last_update_time = 0.0
+    discard = ctypes.POINTER(TranscriptC)()
     try:
         for chunk in common.chunk_iter(audio, sample_rate):
             arr = (ctypes.c_float * len(chunk))(*chunk)
@@ -79,6 +99,13 @@ def feed_stream(
                 0,
             )
             check_error(err)
+            stream_time += len(chunk) / sample_rate
+            if stream_time - last_update_time >= update_interval:
+                err = lib.moonshine_transcribe_stream(
+                    transcriber_handle, stream_handle, 0, ctypes.byref(discard)
+                )
+                check_error(err)
+                last_update_time = stream_time
     finally:
         err = lib.moonshine_stop_stream(transcriber_handle, stream_handle)
         check_error(err)
@@ -223,15 +250,6 @@ def _self_check(args) -> "SelfCheckResult | None":
             f"missing --file-b: {args.file_b}", "06_multi_stream"
         )
 
-    # The example's ``feed_stream`` only calls
-    # ``moonshine_transcribe_stream`` once at the very end, so
-    # the VAD never gets a chance to finalize any segments and
-    # the transcript is empty. The fix is to call
-    # ``moonshine_transcribe_stream`` periodically inside the
-    # feed loop (the higher-level ``Transcriber.add_audio``
-    # wrapper does this for us every 0.5 s). Until that bug
-    # is fixed, SKIP with a clear message rather than FAIL
-    # on the empty-transcript assertion.
     common.hr("Loading model")
     model_path, arch = get_model_for_language(args.language, args.model_arch)
 
@@ -248,12 +266,17 @@ def _self_check(args) -> "SelfCheckResult | None":
             ta = feed_stream(lib, transcriber_handle, handle_a, args.file_a)
             tb = feed_stream(lib, transcriber_handle, handle_b, args.file_b)
             if not ta.lines or not tb.lines:
-                return SelfCheckResult.skip(
-                    "example's feed_stream only calls "
-                    "moonshine_transcribe_stream once at the end; "
-                    "needs a periodic call inside the feed loop to "
-                    "flush the VAD — see comment in "
-                    "examples/python/stt/06_multi_stream.py:feed_stream",
+                # Previously this branch was a SKIP — feed_stream
+                # only called ``moonshine_transcribe_stream`` once
+                # at the end, so the VAD never finalised any
+                # segments. That bug is fixed: feed_stream now
+                # flushes every 0.5s, matching the cadence of the
+                # high-level ``Stream.add_audio``. An empty
+                # transcript is now a real failure, not a known
+                # limitation.
+                return SelfCheckResult.fail(
+                    "expected ≥ 1 transcript line from each of the "
+                    f"two streams; got A={len(ta.lines)} B={len(tb.lines)}",
                     "06_multi_stream",
                 )
             return None  # PASS
