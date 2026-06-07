@@ -22,7 +22,7 @@ What this script demonstrates
 * ``word_timestamps`` — opt in to word-level timing (requires an
   attention-decoder variant of the model; falls back to silent skip if
   the variant is not present).
-* ``log_output_text`` / ``log_ort_runs`` — verbose logging.
+* ``log_output_text`` / ``log_ort_run`` — verbose logging.
 
 Run it
 ------
@@ -54,7 +54,11 @@ def build_options_dict(args) -> Dict[str, str]:
         "identify_speakers": "true",
         "return_audio_data": "true",
         "log_output_text": "true" if args.debug else "false",
-        "log_ort_runs": "true" if args.debug else "false",
+        # The C-side option is named ``log_ort_run`` (singular)
+        # — see core/moonshine-c-api.cpp:124. Earlier versions
+        # of this example passed ``log_ort_runs`` (plural), which
+        # the C library rejects with "Unknown transcriber option".
+        "log_ort_run": "true" if args.debug else "false",
     }
     if args.word_timestamps:
         base["word_timestamps"] = "true"
@@ -147,12 +151,6 @@ def main() -> None:
 def _self_check(args) -> "SelfCheckResult | None":
     """Smoke test: turn on options, transcribe, assert lines and
     speaker-identification wiring work.
-
-    Filters out ``log_ort_runs`` because the C library doesn't
-    recognise that option (a real bug in the example — see the
-    plan's "Known gaps" for the cleanup). The C library will
-    return an error if we pass it, so we strip it before loading
-    the model.
     """
     from test_support.self_check import SelfCheckResult
 
@@ -162,10 +160,6 @@ def _self_check(args) -> "SelfCheckResult | None":
             f"missing test audio: {wav_path}", "04_options_and_tuning"
         )
     options = build_options_dict(args)
-    # Drop options the C library doesn't accept; the example's
-    # full option set is exercised by the regular (non-self-check)
-    # run where the user can see the real error.
-    options.pop("log_ort_runs", None)
     transcriber, _ = common.load_stt_model(
         language=args.language, options=options
     )
