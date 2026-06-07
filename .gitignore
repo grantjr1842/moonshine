@@ -50,3 +50,8 @@ text-to-speech
 transcriber
 build-*/
 /eval-results.txt
+
+# Claude Code harness runtime artifacts (lock files for scheduled-task
+# coordination). Not part of the project; created and managed by
+# the Claude Code CLI.
+/.claude/scheduled_tasks.lock
