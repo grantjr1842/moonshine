@@ -15,6 +15,15 @@
 #   WINDOWS_CLOUD_INSTANCE - GCP instance name for the Windows VM (optional)
 #   WINDOWS_CLOUD_ZONE     - GCP zone for the Windows VM (e.g. us-central1-b)
 #   WINDOWS_CLOUD_PROJECT  - GCP project ID for the Windows VM
+#   TEST_EXAMPLE_TESTS=1   - Also run scripts/test-all-examples.sh
+#                            (the umbrella over the C++ core, Python
+#                            example self-checks, C++ example smoke
+#                            tests, and iOS/Android example builds).
+#                            Off by default — example tests are
+#                            slower than the C++ core suite and
+#                            not yet on the critical path. Set
+#                            this once the suite is stable and
+#                            failure-tolerant.
 #
 # When the LINUX_CLOUD_INSTANCE / WINDOWS_CLOUD_INSTANCE variables are set the
 # script will start the corresponding GCP VM before connecting and stop it
@@ -97,6 +106,15 @@ trap cleanup EXIT
 
 cd ${REPO_ROOT_DIR}
 scripts/test-core.sh
+# The umbrella over the example test suites. Off by default
+# because it can take 5-15 minutes (Python examples load ~430 MB
+# of models on first run) and isn't yet on the critical path
+# for releases. Enable with ``TEST_EXAMPLE_TESTS=1`` once the
+# suite is stable. The umbrella does its own exit-code reporting
+# so any individual FAIL aborts the release pipeline.
+if [[ "${TEST_EXAMPLE_TESTS:-0}" == "1" ]]; then
+    scripts/test-all-examples.sh
+fi
 scripts/build-swift.sh
 scripts/publish-swift.sh
 scripts/publish-android.sh
@@ -116,11 +134,13 @@ fi
 ssh ${LINUX_CLOUD_HOST} 'cd moonshine \
   && git pull origin main \
   && scripts/test-core.sh \
+  && (if [ "${TEST_EXAMPLE_TESTS:-0}" = "1" ]; then scripts/test-all-examples.sh; fi) \
   && scripts/publish-binary.sh upload' || exit 1
 
 ssh -p ${RPI_CLOUD_PORT} ${RPI_CLOUD_HOST} 'cd moonshine \
   && git pull origin main \
   && scripts/test-core.sh \
+  && (if [ "${TEST_EXAMPLE_TESTS:-0}" = "1" ]; then scripts/test-all-examples.sh; fi) \
   && scripts/build-pip.sh upload \
   && scripts/publish-binary.sh upload' || exit 1
 
