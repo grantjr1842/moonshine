@@ -1223,6 +1223,13 @@ release-tarball download is required. The umbrella aggregates pass /
 fail / skip counts across all four sub-suites; its exit code is 0
 only if every sub-suite passed.
 
+A GitHub Actions workflow (`.github/workflows/test-examples.yml`)
+runs the umbrella on every push to `main` and on every pull
+request. The Linux job runs the C++ core, Python example
+self-checks, and C++ example smoke tests; the macOS job runs the
+iOS + Android example builds (the only sub-suite that needs
+platform-specific toolchains).
+
 Useful environment variables:
 
 | Variable | Effect |

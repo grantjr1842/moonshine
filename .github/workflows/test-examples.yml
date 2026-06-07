@@ -1,0 +1,79 @@
+name: Test examples
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-python-and-cpp:
+    name: Linux · Python + C++ example tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The published ``moonshine-voice`` package ships the C
+      # library, models, and bundled test audio. Pulling it
+      # from PyPI is faster and more deterministic than the
+      # build-from-source flow that contributors use locally.
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true  # pull the LFS-tracked test fixtures
+                       # (test-assets/two_cities.wav, etc.)
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install moonshine-voice and test deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install --upgrade pip
+          # Install the published package — this brings in the
+          # prebuilt libmoonshine + libonnxruntime so we don't
+          # have to build the C++ core from scratch for the
+          # example suite.
+          pip install moonshine-voice sounddevice numpy pytest
+          # Sanity check: the import must work end-to-end.
+          python -c "import moonshine_voice; print('moonshine_voice OK')"
+
+      - name: Run the umbrella test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/test-*.sh
+          # Skip the iOS/Android example sub-suite — it requires
+          # platform-specific toolchains (macOS for iOS, Android
+          # SDK for Android) and is exercised separately in
+          # scripts/test-examples.sh.
+          SKIP_IOS_ANDROID=1 ./scripts/test-all-examples.sh
+
+  macos-ios-android:
+    name: macOS · iOS + Android example builds
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run iOS + Android example builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/test-examples.sh
+          ./scripts/test-examples.sh --local-examples
