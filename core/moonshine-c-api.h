@@ -251,6 +251,38 @@ MOONSHINE_EXPORT int32_t moonshine_get_version(void);
    human-readable string. */
 MOONSHINE_EXPORT const char *moonshine_error_to_string(int32_t error);
 
+/* Frees a buffer that a moonshine_* function documented as "allocated with
+   malloc; release with free" returned to the caller. This covers, for
+   example, ``out_audio_data`` from moonshine_text_to_speech /
+   moonshine_phonemes_to_speech, the JSON / comma-separated strings from
+   moonshine_get_tts_dependencies / moonshine_get_g2p_dependencies /
+   moonshine_get_tts_voices, and ``out_phonemes`` from
+   moonshine_text_to_phonemes.
+
+   Always use this instead of the C runtime ``free`` directly. On Windows the
+   library and its host (e.g. a Python binding) can be linked against
+   different C runtimes with independent heaps, so freeing a library-allocated
+   pointer with the host's ``free`` corrupts the heap. Routing the free back
+   through the library guarantees the allocation and deallocation happen in
+   the same runtime. Safe to call on NULL. */
+MOONSHINE_EXPORT void moonshine_free_buffer(void *ptr);
+
+/* Replaces the contextual-biasing key terms on an existing transcriber, so a
+   caller can follow whatever context the user is in - the contact list on
+   screen, the vocabulary of the document being dictated into - without
+   reloading the model. ``keyterms`` is a comma-separated list using the same
+   syntax as the ``keyterms`` load option; pass NULL or an empty string to turn
+   biasing off.
+
+   Safe to call between transcribe calls on a live stream. Takes effect on the
+   next transcribe call: it does not retroactively change text already emitted.
+
+   Returns ``MOONSHINE_ERROR_NONE`` on success, or a non-zero error code if the
+   handle is invalid or the loaded model is not a streaming architecture (only
+   those decode through a path that can apply the bias). */
+MOONSHINE_EXPORT int32_t moonshine_transcriber_set_keyterms(
+    int32_t transcriber_handle, const char *keyterms);
+
 /* Converts a transcript_t struct into a human-readable string for debugging
  * purposes. The string is owned by the library, and is valid until the next
  * call to moonshine_transcript_to_string. */
@@ -268,7 +300,7 @@ MOONSHINE_EXPORT const char *moonshine_transcript_to_string(
    example `python scripts/download-moonshine-model.py --model-type base
    --model-language en`.
    The source weights are available on the Hugging Face Model Hub at
-   https://huggingface.co/UsefulSensors/, and the download and conversion to
+   https://huggingface.co/moonshine-ai/, and the download and conversion to
    ONNX script is available in this repository at
    `scripts/convert-moonshine-model.sh`.
    The tokenizer.bin contains the token to character mapping for the model,
@@ -283,6 +315,33 @@ MOONSHINE_EXPORT const char *moonshine_transcript_to_string(
    ``ort_providers`` (comma-separated execution provider names such as
    ``CoreML,CPU`` on macOS or ``NNAPI,CPU`` on Android; default is CPU-only),
    and ``coreml_cache_dir`` (directory for CoreML compiled model cache).
+   Pass ``keyterms`` (comma-separated terms, e.g.
+   ``Kubernetes,Anushka Sharma,ANSI/ISO``) to bias the decoder towards words it
+   would otherwise be unlikely to produce - jargon, product names, contact
+   names. No retraining is involved: each term is compiled into a subword trie
+   and used to nudge the decoder's logits, so the terms can be different on
+   every transcriber and can be replaced mid-stream with
+   ``moonshine_transcriber_set_keyterms``. Match the capitalization and
+   spelling you want to see in the output. Only the streaming architectures
+   apply this. ``keyterm_boost`` (float, default 2.0) sets the strength. The
+   default is where the terms come out most accurately; going higher recovers no
+   more of them and starts putting them where they were not said, so lower it if
+   general accuracy matters more than the list does, rather than raising it.
+   Pass ``identify_speakers`` (bool, default false) to enable speaker
+   diarization: each line then carries a ``speaker_spans`` array describing
+   who spoke when, including UTF-8 character ranges into the line text.
+   This also enables word timestamps automatically. This runs the cpp-annote
+   diarization pipeline (a port of
+   pyannote community-1) inline inside transcription calls, which adds
+   significant compute, and re-clustering cost grows with session length unless
+   bounded by ``diarization_cluster_window_sec``.
+   ``diarization_cluster_cadence`` (float seconds, default 2.0) sets the
+   minimum interval between re-clustering passes - raise it to reduce cost on
+   long sessions - ``diarization_analyze_cadence`` (float seconds,
+   default 0 = model default of 1.0) sets the interval between
+   segmentation/embedding model runs, and ``diarization_cluster_window_sec``
+   (float seconds, default 120.0) limits how much audio history VBx
+   re-clustering considers on each refresh (0 = unlimited full history).
    Pass ``"spelling_model_path"`` with a path to a
    spelling-CNN ``.ort`` file (e.g.
    ``https://download.moonshine.ai/model/spelling-en/spelling_cnn.ort``)

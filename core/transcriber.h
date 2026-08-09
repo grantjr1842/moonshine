@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "context-biaser.h"
 #include "moonshine-model.h"
 #include "moonshine-streaming-model.h"
 #include "voice-activity-detector.h"
@@ -132,6 +133,17 @@ struct TranscriberOptions {
   float vad_max_segment_duration = 15.0f;
   float max_tokens_per_second = 6.5f;
   float speaker_id_cluster_threshold = 0.6f;
+
+  // Terms to bias the decoder towards at runtime - jargon, product names,
+  // proper nouns. No retraining is involved: each term is compiled into a
+  // subword trie and used to nudge the logits during decoding (see
+  // context-biaser.h). Only the streaming architectures support this. Can also
+  // be changed mid-stream with Transcriber::set_keyterms.
+  std::vector<std::string> keyterms;
+
+  // Strength of the nudge. Higher recovers more key terms but risks hearing
+  // them where they were not said.
+  float keyterm_boost = ContextBiaser::kDefaultBoost;
   std::string save_input_wav_path = "";
   bool log_ort_run = false;
   std::vector<std::string> ort_provider_names{};
@@ -167,6 +179,12 @@ class Transcriber {
   uint32_t next_speaker_index = 0;
   std::map<uint64_t, uint32_t> speaker_index_map;
 
+  // Compiled key-term trie for contextual biasing. Empty unless the caller
+  // asked for key terms. Guarded because set_keyterms can be called from
+  // another thread while a stream is running.
+  ContextBiaser context_biaser;
+  std::mutex context_biaser_mutex;
+
   // Track current segment for incremental processing
   uint64_t current_streaming_segment_id = UINT64_MAX;
   size_t streaming_samples_processed = 0;
@@ -188,6 +206,14 @@ class Transcriber {
                                     uint64_t audio_length, int32_t sample_rate,
                                     uint32_t flags,
                                     struct transcript_t **out_transcript);
+
+  // Replaces the contextual-biasing key terms. Safe to call between
+  // transcribe calls on a live stream, so a caller can follow the user's
+  // context (the contact list on screen, the current document's vocabulary)
+  // as it changes. Passing an empty list turns biasing off. Throws if the
+  // loaded model is not a streaming architecture, which is the only one whose
+  // decode path applies the bias.
+  void set_keyterms(const std::vector<std::string> &keyterms);
 
   int32_t create_stream();
   void free_stream(int32_t stream_id);
