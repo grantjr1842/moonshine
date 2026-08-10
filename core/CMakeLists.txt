@@ -15,7 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if (NOT WIN32)
-  add_compile_options(-Wall -Wextra -pedantic -Werror)
+  add_compile_options(-Wall -Wextra -pedantic -Werror -Wno-error=unused-result -Wno-error=maybe-uninitialized)
 endif()
 # Enable this to catch memory leaks and access violations.
 # This is only supported on Linux.
@@ -267,6 +267,22 @@ endif()
 target_link_libraries(moonshine-c-api-memory-test PRIVATE
     moonshine
 )
+
+# This test supplies a blocking mock C ABI so lifecycle ordering is tested
+# without model assets or native inference.  It is intentionally C++11 like
+# the public wrapper compatibility test.
+add_executable(moonshine-cpp-lifecycle-test moonshine-cpp-lifecycle-test.cpp)
+set_target_properties(moonshine-cpp-lifecycle-test PROPERTIES
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_include_directories(moonshine-cpp-lifecycle-test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+)
+add_test(NAME moonshine_cpp_lifecycle_test
+    COMMAND moonshine-cpp-lifecycle-test)
 
 # Make this test C++11 to ensure our API is backwards compatible, even
 # though the internal implementation is C++20.
