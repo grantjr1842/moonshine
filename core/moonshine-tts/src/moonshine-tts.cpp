@@ -654,7 +654,21 @@ void read_kokorovoice_bytes(const uint8_t* data, size_t size,
     throw std::runtime_error("MoonshineTTS: invalid voice header (" +
                              std::string(context_for_errors) + ")");
   }
+  // A-118: cap the total voice tensor size so a hostile 16 GB
+  // voice file can't trigger a 16 GB vector<float> allocation
+  // on load. Kokoro voices are < 100 MB in practice (typical
+  // English voice is ~50 MB of float32 weights); 512 MB is the
+  // documented upper bound.
+  static constexpr size_t kMaxVoiceFloats = 512UL * 1024UL * 1024UL / sizeof(float);
   const size_t n = static_cast<size_t>(r) * static_cast<size_t>(c);
+  if (n == 0 || n > kMaxVoiceFloats) {
+    throw std::runtime_error("MoonshineTTS: voice header dimensions " +
+                             std::to_string(r) + "x" + std::to_string(c) +
+                             " exceed maximum (" +
+                             std::to_string(kMaxVoiceFloats) +
+                             " floats, " +
+                             std::string(context_for_errors) + ")");
+  }
   const size_t need = 12 + n * sizeof(float);
   if (size < need) {
     throw std::runtime_error("MoonshineTTS: truncated voice data (" +
