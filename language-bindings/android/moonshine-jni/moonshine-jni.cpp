@@ -251,8 +251,14 @@ static jobject c_transcript_to_jobject(JNIEnv *env,
       get_method(env, transcriptClass, "<init>", "()V");
   jfieldID linesField =
       get_field(env, transcriptClass, "lines", "Ljava/util/List;");
+  jfieldID revisionField =
+      get_field(env, transcriptClass, "revision", "J");
   jobject jtranscript = env->NewObject(transcriptClass, transcriptConstructor);
   env->SetObjectField(jtranscript, linesField, linesList);
+  // A-147: propagate the snapshot revision from the C transcript_t so
+  // Java callers can ack it via JNI.moonshineStreamAcknowledgeRevision.
+  env->SetLongField(jtranscript, revisionField,
+                    static_cast<jlong>(transcript->revision));
 
   env->DeleteLocalRef(listClass);
   env->DeleteLocalRef(lineClass);
@@ -640,6 +646,25 @@ Java_ai_moonshine_voice_JNI_moonshineTranscribeStream(JNIEnv *env,
   } catch (const std::exception &e) {
     ALOGE("moonshineTranscribeStream: %s\n", e.what());
     return nullptr;
+  }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ai_moonshine_voice_JNI_moonshineStreamAcknowledgeRevision(
+    JNIEnv *env, jobject /* this */, jint transcriber_handle,
+    jint stream_handle, jlong observed_revision) {
+  try {
+    ALOGD("moonshineStreamAcknowledgeRevision: handle=%d stream=%d rev=%lld",
+          transcriber_handle, stream_handle,
+          static_cast<long long>(observed_revision));
+    int error = moonshine_stream_acknowledge_revision(
+        transcriber_handle, stream_handle,
+        static_cast<uint64_t>(observed_revision));
+    ALOGD("moonshineStreamAcknowledgeRevision: error=%d", error);
+    return error;
+  } catch (const std::exception &e) {
+    ALOGE("moonshineStreamAcknowledgeRevision: %s\n", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
   }
 }
 

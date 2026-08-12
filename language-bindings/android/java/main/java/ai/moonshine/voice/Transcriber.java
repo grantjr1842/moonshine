@@ -337,6 +337,13 @@ public class Transcriber implements AutoCloseable {
     Transcript transcript = JNI.moonshineTranscribeStream(
         this.transcriberHandle, streamHandle,
         JNI.MOONSHINE_FLAG_FORCE_UPDATE | this.transcribeFlags);
+    // A-147: ack the snapshot revision we just consumed so the server's
+    // clear_update_flags(up_to_revision) stops re-flagging lines we
+    // already observed. Stale acks are ignored by the C-ABI.
+    if (transcript != null) {
+      JNI.moonshineStreamAcknowledgeRevision(
+          this.transcriberHandle, streamHandle, transcript.revision);
+    }
     this.pendingSeconds.put(streamHandle, 0.0);
     this.notifyFromTranscript(transcript, streamHandle);
   }
@@ -375,6 +382,13 @@ public class Transcriber implements AutoCloseable {
     long started = System.nanoTime();
     Transcript transcript = JNI.moonshineTranscribeStream(
         this.transcriberHandle, streamHandle, this.transcribeFlags);
+    // A-147: ack the snapshot revision we just consumed so the server's
+    // clear_update_flags(up_to_revision) stops re-flagging lines we
+    // already observed.
+    if (transcript != null) {
+      JNI.moonshineStreamAcknowledgeRevision(
+          this.transcriberHandle, streamHandle, transcript.revision);
+    }
     // What the engine cost, not what the listeners go on to do with it: showing
     // the words is the caller's own budget to keep.
     this.lastPassSeconds.put(streamHandle,

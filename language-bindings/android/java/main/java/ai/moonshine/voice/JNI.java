@@ -84,6 +84,15 @@ public class JNI {
     public static native Transcript moonshineTranscribeStream(int transcriber_handle,
             int stream_handle, int flags);
 
+    /**
+     * A-147: ack the snapshot revision the caller has consumed.
+     * Native advances the high-water mark monotonically (stale acks
+     * are ignored). Should be called after each
+     * {@link #moonshineTranscribeStream}.
+     */
+    public static native int moonshineStreamAcknowledgeRevision(
+            int transcriber_handle, int stream_handle, long observed_revision);
+
     // Text embeddings back AgentFlow's phrase matching and are not part of the
     // library's public surface, so these stay package-private.
 
