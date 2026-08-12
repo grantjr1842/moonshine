@@ -157,6 +157,19 @@ public class Transcriber implements AutoCloseable {
   public void loadFromFiles(String modelRootDir, int modelArch) {
     checkOpen();
     JNI.ensureLibraryLoaded();
+    // A-044: free any previously-loaded model before assigning a new
+    // handle. Without this, a load-then-load sequence leaks the
+    // first native model.
+    int prevHandle = this.transcriberHandle;
+    int prevStream = this.defaultStreamHandle;
+    if (prevStream >= 0) {
+      JNI.moonshineFreeStream(prevHandle, prevStream);
+      this.defaultStreamHandle = -1;
+    }
+    if (prevHandle >= 0) {
+      JNI.moonshineFreeTranscriber(prevHandle);
+      this.transcriberHandle = -1;
+    }
     this.transcriberHandle = JNI.moonshineLoadTranscriberFromFiles(
         modelRootDir, modelArch, options.toArray(new TranscriberOption[0]));
     if (this.transcriberHandle < 0) {
@@ -184,6 +197,19 @@ public class Transcriber implements AutoCloseable {
                              int modelArch) {
     checkOpen();
     JNI.ensureLibraryLoaded();
+    // A-044: free any previously-loaded model before assigning a new
+    // handle. Without this, a load-then-load sequence leaks the
+    // first native model.
+    int prevHandle = this.transcriberHandle;
+    int prevStream = this.defaultStreamHandle;
+    if (prevStream >= 0) {
+      JNI.moonshineFreeStream(prevHandle, prevStream);
+      this.defaultStreamHandle = -1;
+    }
+    if (prevHandle >= 0) {
+      JNI.moonshineFreeTranscriber(prevHandle);
+      this.transcriberHandle = -1;
+    }
     this.transcriberHandle = JNI.moonshineLoadTranscriberFromMemory(
         encoderModelData, decoderModelData, tokenizerData, spellingModelData,
         modelArch, options.toArray(new TranscriberOption[0]));
@@ -205,7 +231,21 @@ public class Transcriber implements AutoCloseable {
    * @param modelFiles Map of canonical filename to model bytes.
    */
   public void loadFromMemory(Map<String, byte[]> modelFiles, int modelArch) {
+    checkOpen();
     JNI.ensureLibraryLoaded();
+    // A-044: free any previously-loaded model before assigning a new
+    // handle. Without this, a load-then-load sequence leaks the
+    // first native model.
+    int prevHandle = this.transcriberHandle;
+    int prevStream = this.defaultStreamHandle;
+    if (prevStream >= 0) {
+      JNI.moonshineFreeStream(prevHandle, prevStream);
+      this.defaultStreamHandle = -1;
+    }
+    if (prevHandle >= 0) {
+      JNI.moonshineFreeTranscriber(prevHandle);
+      this.transcriberHandle = -1;
+    }
     String[] filenames = new String[modelFiles.size()];
     byte[][] memory = new byte[modelFiles.size()][];
     int i = 0;
@@ -233,7 +273,6 @@ public class Transcriber implements AutoCloseable {
   public void loadFromAssets(AppCompatActivity parentContext, String path,
                              String spellingAssetPath, int modelArch) {
     checkOpen();
-    AssetManager assetManager = parentContext.getAssets();
     AssetManager assetManager = parentContext.getAssets();
     String encoderModelPath = path + "/encoder_model.ort";
     String decoderModelPath = path + "/decoder_model_merged.ort";
