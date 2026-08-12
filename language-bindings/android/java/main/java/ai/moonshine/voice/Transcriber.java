@@ -24,10 +24,20 @@ import java.util.function.Consumer;
 import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
-public class Transcriber {
-  private int transcriberHandle = -1;
-  private int defaultStreamHandle = -1;
+public class Transcriber implements AutoCloseable {
+  // A-141: volatile so a concurrent close() that writes -1 cannot
+  // race an in-flight transcribe* call that has already snapshotted
+  // the handle under the closed-flag guard.
+  private volatile int transcriberHandle = -1;
+  private volatile int defaultStreamHandle = -1;
+  /**
+   * 0 = open, 1 = closed. CAS-transitioned by close() so only one thread
+   * actually frees the native handles; subsequent close() calls are
+   * idempotent no-ops. Mirrors the GraphemeToPhonemizer A-141 partial fix.
+   */
+  private final AtomicInteger closed = new AtomicInteger(0);
   private final List<Consumer<TranscriptEvent>> listeners =
       new CopyOnWriteArrayList<>();
   private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -145,6 +155,7 @@ public class Transcriber {
   }
 
   public void loadFromFiles(String modelRootDir, int modelArch) {
+    checkOpen();
     JNI.ensureLibraryLoaded();
     this.transcriberHandle = JNI.moonshineLoadTranscriberFromFiles(
         modelRootDir, modelArch, options.toArray(new TranscriberOption[0]));
@@ -171,6 +182,7 @@ public class Transcriber {
   public void loadFromMemory(byte[] encoderModelData, byte[] decoderModelData,
                              byte[] tokenizerData, byte[] spellingModelData,
                              int modelArch) {
+    checkOpen();
     JNI.ensureLibraryLoaded();
     this.transcriberHandle = JNI.moonshineLoadTranscriberFromMemory(
         encoderModelData, decoderModelData, tokenizerData, spellingModelData,
@@ -210,12 +222,6 @@ public class Transcriber {
     this.getDefaultStreamHandle();
   }
 
-  public void loadFromAssets(AppCompatActivity parentContext, String path,
-                             int modelArch) {
-    this.loadFromAssets(parentContext, path, /*spellingAssetPath=*/null,
-                        modelArch);
-  }
-
   /**
    * Loads a transcriber from APK assets, optionally including a spelling
    * model so the spelling-fusion path can be used.
@@ -226,6 +232,8 @@ public class Transcriber {
    */
   public void loadFromAssets(AppCompatActivity parentContext, String path,
                              String spellingAssetPath, int modelArch) {
+    checkOpen();
+    AssetManager assetManager = parentContext.getAssets();
     AssetManager assetManager = parentContext.getAssets();
     String encoderModelPath = path + "/encoder_model.ort";
     String decoderModelPath = path + "/decoder_model_merged.ort";
@@ -247,19 +255,38 @@ public class Transcriber {
     this.getDefaultStreamHandle();
   }
 
-  /** Releases the native model. The instance cannot be used afterwards. */
+  /** Releases the native model. Idempotent: subsequent calls are no-ops. */
+  @Override
   public void close() {
-    if (this.transcriberHandle >= 0) {
-      if (this.defaultStreamHandle >= 0) {
-        JNI.moonshineFreeStream(this.transcriberHandle,
-                                this.defaultStreamHandle);
-        this.defaultStreamHandle = -1;
-      }
-      JNI.moonshineFreeTranscriber(this.transcriberHandle);
+    // CAS-transition closed 0 -> 1 so only one thread actually frees the
+    // native handles. Mirrors the GraphemeToPhonemizer A-141 partial fix.
+    if (!closed.compareAndSet(0, 1)) {
+      return;
+    }
+    int tH = this.transcriberHandle;
+    int sH = this.defaultStreamHandle;
+    if (sH >= 0) {
+      JNI.moonshineFreeStream(tH, sH);
+      this.defaultStreamHandle = -1;
+    }
+    if (tH >= 0) {
+      JNI.moonshineFreeTranscriber(tH);
       this.transcriberHandle = -1;
     }
     this.pendingSeconds.clear();
     this.lastPassSeconds.clear();
+  }
+
+  /**
+   * A-141: reject post-close operation attempts with a deterministic
+   * IllegalStateException so callers learn about the lifecycle issue
+   * instead of crashing with a native SIGSEGV on a freed handle.
+   * Mirrors the GraphemeToPhonemizer A-141 partial fix.
+   */
+  private void checkOpen() {
+    if (closed.get() != 0) {
+      throw new IllegalStateException("Transcriber is closed");
+    }
   }
 
   /** True once one of the {@code load*} methods has succeeded. */
@@ -278,6 +305,7 @@ public class Transcriber {
 
   public Transcript transcribeWithoutStreaming(float[] audioData, int sampleRate,
                                                int flags) {
+    checkOpen();
     return JNI.moonshineTranscribeWithoutStreaming(this.transcriberHandle,
                                                    audioData, sampleRate, flags);
   }
@@ -334,6 +362,7 @@ public class Transcriber {
 
   public void addAudioToStream(int streamHandle, float[] audioData,
                                int sampleRate) {
+    checkOpen();
     JNI.moonshineAddAudioToStream(this.transcriberHandle, streamHandle,
                                   audioData, sampleRate, this.transcribeFlags);
     // The audio is safely in the stream either way; whether to look for new
