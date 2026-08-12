@@ -38,7 +38,14 @@ std::unique_ptr<EmbeddingModel> load_embedding_model(
 }  // namespace
 
 TextEmbedder::TextEmbedder(const TextEmbedderOptions &options)
-    : embedding_model_(load_embedding_model(options)) {}
+    : embedding_model_(load_embedding_model(options)),
+      // A-106: cache the embedding dimension once so subsequent
+      // moonshine_calculate_embedding_distance calls can validate
+      // the caller's count without re-running the model. We use a
+      // short probe (one empty-string embedding) — the dimension
+      // is constant per model architecture, so the cost is one
+      // model invocation at construction time.
+      cached_embedding_size_(embedding_model_->get_embeddings("").size()) {}
 
 TextEmbedder::~TextEmbedder() = default;
 
@@ -55,7 +62,8 @@ float TextEmbedder::calculate_similarity(const std::vector<float> &a,
 }
 
 size_t TextEmbedder::get_embedding_size() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto probe = embedding_model_->get_embeddings("");
-  return probe.size();
+  // A-106: served from the cached value; the original probe-based
+  // implementation ran the model on every call which was both slow
+  // and unsafe (concurrent calls during construction could race).
+  return cached_embedding_size_;
 }

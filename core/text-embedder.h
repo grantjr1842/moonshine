@@ -86,6 +86,10 @@ class TextEmbedder {
 
  private:
   std::unique_ptr<EmbeddingModel> embedding_model_;
+  // A-106: cached embedding dimension so moonshine_calculate_embedding_distance
+  // can validate the caller's count without re-running the model. Set once at
+  // construction; reads are lock-free.
+  size_t cached_embedding_size_ = 0;
   mutable std::mutex mutex_;
 };
 

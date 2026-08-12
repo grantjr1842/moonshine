@@ -468,6 +468,27 @@ int32_t moonshine_stop_stream(int32_t transcriber_handle,
   return MOONSHINE_ERROR_NONE;
 }
 
+int32_t moonshine_stream_acknowledge_revision(int32_t transcriber_handle,
+                                              int32_t stream_handle,
+                                              uint64_t observed_revision) {
+  if (log_api_calls) {
+    LOGF(
+        "moonshine_stream_acknowledge_revision(transcriber_handle=%d, "
+        "stream_handle=%d, observed_revision=%llu)",
+        transcriber_handle, stream_handle,
+        static_cast<unsigned long long>(observed_revision));
+  }
+  CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
+  try {
+    transcriber_map[transcriber_handle]->acknowledge_stream_revision(
+        stream_handle, observed_revision);
+  } catch (const std::exception &e) {
+    LOGF("Failed to acknowledge stream revision: %s\n", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
 const char *moonshine_transcript_to_string(
     const struct transcript_t *transcript) {
   if (log_api_calls) {
@@ -727,10 +748,24 @@ int32_t moonshine_calculate_embedding_distance(int32_t embedding_model_handle,
   }
   CHECK_EMBEDDING_MODEL_HANDLE(embedding_model_handle);
   try {
+    // A-106: validate embedding_size against the model's actual
+    // dimension. The cached size is set once at construction;
+    // a mismatched count from the caller (e.g. ctypes round-trip
+    // with a different pointer width or a deliberately hostile
+    // value) returns INVALID_ARGUMENT rather than allocating a
+    // huge or wrapped-size std::vector.
+    TextEmbedder *embedder =
+        embedding_model_map[embedding_model_handle];
+    const size_t expected = embedder->get_embedding_size();
+    if (expected != 0 && embedding_size != expected) {
+      LOGF("moonshine_calculate_embedding_distance: embedding_size=%" PRIu64
+           " does not match model embedding dimension (%" PRIu64 ")",
+           embedding_size, static_cast<uint64_t>(expected));
+      return MOONSHINE_ERROR_INVALID_ARGUMENT;
+    }
     std::vector<float> a(embedding_a, embedding_a + embedding_size);
     std::vector<float> b(embedding_b, embedding_b + embedding_size);
-    *out_similarity =
-        embedding_model_map[embedding_model_handle]->calculate_similarity(a, b);
+    *out_similarity = embedder->calculate_similarity(a, b);
   } catch (const std::exception &e) {
     LOGF("Failed to calculate embedding distance: %s", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
@@ -1458,8 +1493,21 @@ int32_t moonshine_text_to_speech(int32_t tts_synthesizer_handle,
   }
   CHECK_TTS_SYNTHESIZER_HANDLE(tts_synthesizer_handle);
   try {
-    moonshine_tts::MoonshineTTS *synth =
-        text_to_speech_synthesizer_map[tts_synthesizer_handle];
+    // A-137: re-check the map under the lock so a concurrent free
+    // cannot delete the object between the CHECK above and the
+    // dereference below.
+    moonshine_tts::MoonshineTTS *synth = nullptr;
+    {
+      std::lock_guard<std::mutex> _lk(text_to_speech_synthesizer_map_mutex);
+      auto _it = text_to_speech_synthesizer_map.find(tts_synthesizer_handle);
+      if (_it != text_to_speech_synthesizer_map.end()) {
+        synth = _it->second;
+      }
+    }
+    if (synth == nullptr) {
+      // Handle was freed between CHECK and the locked lookup.
+      return MOONSHINE_ERROR_INVALID_HANDLE;
+    }
     const std::vector<std::pair<std::string, std::string>> tts_pairs =
         tts_option_pairs_from_c(options, options_count);
     const std::vector<float> wave = tts_pairs.empty()
@@ -1511,8 +1559,19 @@ int32_t moonshine_phonemes_to_speech(int32_t tts_synthesizer_handle,
   }
   CHECK_TTS_SYNTHESIZER_HANDLE(tts_synthesizer_handle);
   try {
-    moonshine_tts::MoonshineTTS *synth =
-        text_to_speech_synthesizer_map[tts_synthesizer_handle];
+    // A-137: re-check under the lock so a concurrent free cannot
+    // delete the object between the CHECK and the dereference below.
+    moonshine_tts::MoonshineTTS *synth = nullptr;
+    {
+      std::lock_guard<std::mutex> _lk(text_to_speech_synthesizer_map_mutex);
+      auto _it = text_to_speech_synthesizer_map.find(tts_synthesizer_handle);
+      if (_it != text_to_speech_synthesizer_map.end()) {
+        synth = _it->second;
+      }
+    }
+    if (synth == nullptr) {
+      return MOONSHINE_ERROR_INVALID_HANDLE;
+    }
     const std::vector<std::pair<std::string, std::string>> tts_pairs =
         tts_option_pairs_from_c(options, options_count);
     const std::vector<float> wave =
@@ -2610,8 +2669,19 @@ int32_t moonshine_text_to_phonemes(int32_t grapheme_to_phonemizer_handle,
   }
   CHECK_GRAPHEME_PHONEMIZER_HANDLE(grapheme_to_phonemizer_handle);
   try {
-    moonshine_tts::MoonshineG2P *g2p =
-        grapheme_phonemizer_map[grapheme_to_phonemizer_handle];
+    // A-137: re-check under the lock so a concurrent free cannot
+    // delete the object between the CHECK and the dereference below.
+    moonshine_tts::MoonshineG2P *g2p = nullptr;
+    {
+      std::lock_guard<std::mutex> _lk(grapheme_phonemizer_map_mutex);
+      auto _it = grapheme_phonemizer_map.find(grapheme_to_phonemizer_handle);
+      if (_it != grapheme_phonemizer_map.end()) {
+        g2p = _it->second;
+      }
+    }
+    if (g2p == nullptr) {
+      return MOONSHINE_ERROR_INVALID_HANDLE;
+    }
     const std::string ipa = g2p->text_to_ipa(text);
     *out_phonemes_count = 0;
     *out_phonemes = nullptr;
