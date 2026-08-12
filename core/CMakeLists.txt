@@ -212,9 +212,14 @@ set_target_properties(moonshine PROPERTIES
 # On macOS (non-framework builds), set rpath to @loader_path so the library looks for dependencies
 # (like libonnxruntime) in the same directory as libmoonshine.dylib
 # Note: Static frameworks don't need rpath since they're linked statically
-if(APPLE AND NOT IOS AND NOT MOONSHINE_BUILD_SWIFT)
+if((APPLE AND NOT IOS AND NOT MOONSHINE_BUILD_SWIFT) OR LINUX)
+    if(APPLE)
+        set(_moonshine_install_rpath "@loader_path")
+    else()
+        set(_moonshine_install_rpath "$ORIGIN")
+    endif()
     set_target_properties(moonshine PROPERTIES
-        INSTALL_RPATH "@loader_path"
+        INSTALL_RPATH "${_moonshine_install_rpath}"
         BUILD_WITH_INSTALL_RPATH TRUE
     )
 endif()
@@ -492,6 +497,52 @@ target_link_libraries(moonshine-cpp-test PRIVATE
     moonshine
     moonshine-utils
 )
+
+# Per-stream delta semantics regression for A-147. Exercises
+# TranscriptStreamOutput directly so the timer-update-then-poll bug is
+# covered without loading a streaming model.
+add_executable(moonshine-streaming-delta-test moonshine-streaming-delta-test.cpp)
+set_target_properties(moonshine-streaming-delta-test PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_include_directories(moonshine-streaming-delta-test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+    ${CMAKE_CURRENT_LIST_DIR}/bin-tokenizer
+    ${CMAKE_CURRENT_LIST_DIR}/ort-utils
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/include
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+)
+target_link_libraries(moonshine-streaming-delta-test PRIVATE
+    moonshine
+    moonshine-utils
+    bin-tokenizer
+)
+add_test(NAME moonshine_streaming_delta_test
+    COMMAND moonshine-streaming-delta-test)
+
+# A-065: per-stream audio buffer race regression. Exercises the
+# audio_buffer_mutex / atomic-swap pattern on TranscriberStream's
+# new_audio_buffer. Standalone (no streaming model load).
+add_executable(moonshine-stream-audio-race-test moonshine-stream-audio-race-test.cpp)
+set_target_properties(moonshine-stream-audio-race-test PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_include_directories(moonshine-stream-audio-race-test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+    ${CMAKE_CURRENT_LIST_DIR}/bin-tokenizer
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+)
+target_link_libraries(moonshine-stream-audio-race-test PRIVATE
+    moonshine-utils
+)
+add_test(NAME moonshine_stream_audio_race_test
+    COMMAND moonshine-stream-audio-race-test)
 
 add_executable(benchmark benchmark.cpp)
 target_include_directories(benchmark PRIVATE

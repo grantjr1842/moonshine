@@ -44,6 +44,11 @@ struct TranscriberLine {
   // as more audio arrives. Empty when identify_speakers is disabled.
   std::vector<SpeakerTurn> speaker_spans;
   std::vector<TranscriberWord> words;
+  // Per-line revision (A-147). Each call to add_or_update_line bumps
+  // this on the line being added/updated; the snapshot builder uses
+  // it to decide whether has_text_changed should still be set
+  // relative to last_acknowledged_revision.
+  uint64_t revision = 0;
 
   TranscriberLine();
   TranscriberLine(const TranscriberLine &other);
@@ -67,8 +72,16 @@ struct TranscriptStreamOutput {
   std::vector<std::vector<speaker_span_t>> output_speaker_spans;
   std::mutex mutex;
 
-  struct transcript_t transcript = {.lines = nullptr, .line_count = 0};
+  struct transcript_t transcript = {.lines = nullptr, .line_count = 0, .revision = 0};
+  // High-water mark of revisions the client has acknowledged via
+  // moonshine_stream_acknowledge_revision. clear_update_flags(up_to) only
+  // clears flags for lines whose revision <= this value (A-147).
+  uint64_t last_acknowledged_revision = 0;
+  // Per-TranscriptStreamOutput monotonically increasing revision counter
+  // applied to each line on add_or_update_line (A-147).
+  uint64_t revision = 0;
   void clear_update_flags();
+  void clear_update_flags(uint64_t up_to_revision);
   void mark_all_lines_as_complete();
   void add_or_update_line(TranscriberLine &line);
   void update_transcript_from_lines();
@@ -78,6 +91,10 @@ class TranscriberStream {
  public:
   VoiceActivityDetector *vad = nullptr;
   std::mutex vad_mutex;
+  // A-065: protects `new_audio_buffer` against concurrent
+  // add_to_new_audio_buffer / transcribe_stream (which atomically swaps
+  // it into a local snapshot before VAD processing).
+  std::mutex audio_buffer_mutex;
   TranscriptStreamOutput *transcript_output;
   std::vector<float> new_audio_buffer;
   std::string save_input_wav_path = "";
@@ -253,6 +270,13 @@ class Transcriber {
       const struct transcript_line_t *line);
 
   static std::string *sanitize_text(const char *text);
+
+  // Acknowledge that the client has observed up to the given revision of
+  // the stream's transcript. Advances last_acknowledged_revision
+  // monotonically (stale acks are ignored) so the next transcribe_stream
+  // call only emits changes whose revision is higher than what the client
+  // has already seen (A-147).
+  void acknowledge_stream_revision(int32_t stream_id, uint64_t observed_revision);
 
   // Clips the given diarization turns to each line's time range and stores
   // the resulting spans on the lines, marking have_speakers_changed on any

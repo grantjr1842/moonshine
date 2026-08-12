@@ -635,6 +635,28 @@ void Transcriber::stop_stream(int32_t stream_id) {
   }
 }
 
+void Transcriber::acknowledge_stream_revision(int32_t stream_id,
+                                              uint64_t observed_revision) {
+  std::lock_guard<std::mutex> lock(this->streams_mutex);
+  auto it = this->streams.find(stream_id);
+  if (it == this->streams.end()) {
+    throw std::runtime_error("Stream with ID " + std::to_string(stream_id) +
+                             " not found");
+  }
+  TranscriberStream *stream = it->second;
+  if (stream == nullptr) {
+    throw std::runtime_error("Stream with ID " + std::to_string(stream_id) +
+                             " is null");
+  }
+  std::lock_guard<std::mutex> revision_lock(stream->transcript_output->mutex);
+  // Only ever advance forward; never accept an ack that goes backwards
+  // (a stale client message could otherwise regress the high-water mark
+  // and cause future changes to be hidden behind the cleared flag boundary).
+  if (observed_revision > stream->transcript_output->last_acknowledged_revision) {
+    stream->transcript_output->last_acknowledged_revision = observed_revision;
+  }
+}
+
 void Transcriber::add_audio_to_stream(int32_t stream_id,
                                       const float *audio_data,
                                       uint64_t audio_length,
@@ -681,8 +703,20 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
     throw std::runtime_error(error_message);
   }
 
-  const float *audio_data = stream->new_audio_buffer.data();
-  const uint64_t audio_length = stream->new_audio_buffer.size();
+  // A-065: atomically swap the pending audio buffer into a local snapshot
+  // under audio_buffer_mutex. New audio arriving via add_to_new_audio_buffer
+  // after the swap continues queuing into a fresh empty buffer; the local
+  // snapshot stays stable for the duration of the VAD processing that
+  // follows. Eliminates the iterator/pointer invalidation race that
+  // existed when add_to_new_audio_buffer mutated the same vector out
+  // from under transcribe_stream's read.
+  std::vector<float> audio_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(stream->audio_buffer_mutex);
+    audio_snapshot.swap(stream->new_audio_buffer);
+  }
+  const float *audio_data = audio_snapshot.data();
+  const uint64_t audio_length = audio_snapshot.size();
   const bool has_new_audio = (audio_length > 0);
   const float new_audio_duration = audio_length / (float)(INTERNAL_SAMPLE_RATE);
   const bool long_enough_to_analyze =
@@ -695,8 +729,15 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
       (this->speaker_diarizer != nullptr && stream->diarizer_stream_id >= 0);
   // Return the cached transcript if it's only been a short time since the
   // last transcription.
+  //
+  // Note: do NOT clear per-line update flags here. Clearing them on every
+  // timer tick (regardless of whether the client has actually observed them)
+  // is the A-147 bug — it lets a timer update + short-circuit pair suppress
+  // a real text change before the client polls again. Flags are now cleared
+  // only after the client acknowledges the corresponding revision via
+  // moonshine_stream_acknowledge_revision, which feeds back into the call
+  // to clear_update_flags() at the start of update_transcript_from_segments.
   if (!should_update) {
-    stream->transcript_output->clear_update_flags();
     // Speaker spans may still have been revised since the last call (for
     // example by the final clustering pass in stop_stream), so pick up the
     // latest turns even when the transcription itself is unchanged.
@@ -750,7 +791,11 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
       segments.push_back(std::move(segment_copy));
     }
   }
-  stream->clear_new_audio_buffer();
+  // A-065: clear_new_audio_buffer is no longer called here. The atomic
+  // swap above already transferred ownership of the buffer contents into
+  // `audio_snapshot`, which falls out of scope at the end of this
+  // function. clear_new_audio_buffer is retained as a method for
+  // callers that need to drop pending audio without transcribing.
   this->update_transcript_from_segments(segments, stream, flags,
                                         out_transcript);
   if (!this->options.return_audio_data) {
@@ -869,7 +914,12 @@ void Transcriber::update_transcript_from_segments(
     struct transcript_t **out_transcript) {
   const bool spelling_mode_enabled =
       (flags & MOONSHINE_FLAG_SPELLING_MODE) != 0;
-  stream->transcript_output->clear_update_flags();
+  // Clear update flags only for lines whose internal revision is <= the
+  // client-acknowledged revision. Lines with a higher revision (newer
+  // changes the client has not yet observed) keep their flags so the next
+  // transcribe call still surfaces them (A-147).
+  stream->transcript_output->clear_update_flags(
+      stream->transcript_output->last_acknowledged_revision);
 
   for (size_t segment_index = 0; segment_index < segments.size();
        segment_index++) {
@@ -1441,6 +1491,7 @@ TranscriberLine &TranscriberLine::operator=(const TranscriberLine &other) {
   this->have_speakers_changed = other.have_speakers_changed;
   this->id = other.id;
   this->last_transcription_latency_ms = other.last_transcription_latency_ms;
+  this->revision = other.revision;
   this->speaker_spans = other.speaker_spans;
   this->words = other.words;
   return *this;
@@ -1493,6 +1544,13 @@ void TranscriptStreamOutput::add_or_update_line(TranscriberLine &line) {
     line.is_new = true;
     line.has_text_changed = line.text != nullptr;
   }
+  // Each line carries a per-line revision that survives flag clearing. A
+  // line whose revision is <= last_acknowledged_revision has been observed
+  // by the client; lines with a higher revision retain their flags so the
+  // next transcribe call still surfaces the change (A-147).
+  ++this->revision;
+  line.revision = this->revision;
+  this->transcript.revision = this->revision;
   this->internal_lines_map[line.id] = line;
 }
 
@@ -1551,6 +1609,13 @@ void TranscriptStreamOutput::update_transcript_from_lines() {
       });
     }
 
+    // Compute has_text_changed and is_updated from per-line revision
+    // comparison rather than from the just-updated / has_text_changed flags
+    // alone. The flags can be cleared before the client observes a change
+    // (A-147), but the per-line revision persists across flag-clearing and
+    // is the canonical "has the client seen this version" signal.
+    const bool observed_by_client =
+        (line.revision <= this->last_acknowledged_revision);
     this->output_lines.push_back({
         .text = line.text == nullptr ? nullptr : line.text->c_str(),
         .audio_data = audio_data,
@@ -1559,9 +1624,9 @@ void TranscriptStreamOutput::update_transcript_from_lines() {
         .duration = line.duration,
         .id = line.id,
         .is_complete = line.is_complete,
-        .is_updated = line.just_updated,
-        .is_new = line.is_new,
-        .has_text_changed = line.has_text_changed,
+        .is_updated = !observed_by_client && line.just_updated,
+        .is_new = !observed_by_client && line.is_new,
+        .has_text_changed = !observed_by_client && line.has_text_changed,
         .have_speakers_changed = line.have_speakers_changed,
         .speaker_spans = span_structs.empty() ? nullptr : span_structs.data(),
         .speaker_span_count = (uint64_t)span_structs.size(),
@@ -1577,14 +1642,28 @@ void TranscriptStreamOutput::update_transcript_from_lines() {
 }
 
 void TranscriptStreamOutput::clear_update_flags() {
+  clear_update_flags(std::numeric_limits<uint64_t>::max());
+}
+
+void TranscriptStreamOutput::clear_update_flags(uint64_t up_to_revision) {
   std::lock_guard<std::mutex> lock(this->mutex);
   for (const uint64_t &line_id : this->ordered_internal_line_ids) {
     TranscriberLine &line = this->internal_lines_map.at(line_id);
+    // Only clear flags for lines whose revision has been observed. Lines
+    // newer than up_to_revision keep their flags so the next
+    // transcribe_stream call still surfaces them (A-147).
+    if (line.revision > up_to_revision) {
+      continue;
+    }
     line.just_updated = false;
     line.is_new = false;
     line.has_text_changed = false;
     line.have_speakers_changed = false;
   }
+  // output_lines is rebuilt on every update_transcript_from_lines call
+  // from observed_by_client (line.revision vs last_acknowledged_revision),
+  // so we can clear all output_lines flags unconditionally here. The
+  // per-line revision gate above applies only to internal_lines_map.
   for (transcript_line_t &line : this->output_lines) {
     line.is_updated = 0;
     line.has_text_changed = 0;
@@ -1678,6 +1757,10 @@ void TranscriberStream::add_to_new_audio_buffer(const float *audio_data,
   std::vector<float> audio_vector(audio_data, audio_data + audio_length);
   std::vector<float> resampled_audio =
       resample_audio(audio_vector, sample_rate, INTERNAL_SAMPLE_RATE);
+  // A-065: lock the audio_buffer_mutex so the iterator / pointer pair
+  // taken by a concurrent transcribe_stream snapshot cannot be invalidated
+  // by an insert() that reallocates the vector's backing storage.
+  std::lock_guard<std::mutex> lock(this->audio_buffer_mutex);
   this->new_audio_buffer.insert(this->new_audio_buffer.end(),
                                 resampled_audio.begin(), resampled_audio.end());
 }
