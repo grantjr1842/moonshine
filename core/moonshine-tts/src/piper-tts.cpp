@@ -393,22 +393,61 @@ void load_piper_onnx_json(
   num_speakers = 1;
   if (j.contains("audio") && j["audio"].is_object() &&
       j["audio"].contains("sample_rate")) {
-    native_sample_rate = j["audio"]["sample_rate"].get<int>();
+    // A-119: validate sample_rate before passing into the resampler.
+    // The native resampler divides by sample_rate internally; a zero
+    // value produces infinity downstream, and a negative value
+    // becomes an enormous allocation. Reject both at load time.
+    int parsed_sample_rate = j["audio"]["sample_rate"].get<int>();
+    if (parsed_sample_rate <= 0) {
+      throw std::runtime_error(
+          "Piper config \"audio.sample_rate\" must be positive, got " +
+          std::to_string(parsed_sample_rate));
+    }
+    native_sample_rate = parsed_sample_rate;
   }
   if (j.contains("inference") && j["inference"].is_object()) {
     const auto& inf = j["inference"];
+    // A-119: validate float inference values. NaN / infinity /
+    // out-of-range scales propagate straight into the resampler's
+    // output-length calculation. Reject at load time.
     if (inf.contains("noise_scale")) {
-      noise_scale = inf["noise_scale"].get<float>();
+      float v = inf["noise_scale"].get<float>();
+      if (!std::isfinite(v) || v < 0.0f || v > 10.0f) {
+        throw std::runtime_error(
+            "Piper config \"inference.noise_scale\" must be finite and "
+            "in [0, 10], got " + std::to_string(v));
+      }
+      noise_scale = v;
     }
     if (inf.contains("length_scale")) {
-      length_scale_default = inf["length_scale"].get<float>();
+      float v = inf["length_scale"].get<float>();
+      if (!std::isfinite(v) || v <= 0.0f || v > 10.0f) {
+        throw std::runtime_error(
+            "Piper config \"inference.length_scale\" must be positive "
+            "and finite, got " + std::to_string(v));
+      }
+      length_scale_default = v;
     }
     if (inf.contains("noise_w")) {
-      noise_w = inf["noise_w"].get<float>();
+      float v = inf["noise_w"].get<float>();
+      if (!std::isfinite(v) || v < 0.0f || v > 10.0f) {
+        throw std::runtime_error(
+            "Piper config \"inference.noise_w\" must be finite and "
+            "in [0, 10], got " + std::to_string(v));
+      }
+      noise_w = v;
     }
   }
+  // A-119: bounded num_speakers. A negative or oversized value
+  // flows into voice-id allocation; clamp to a sane range.
   if (j.contains("num_speakers")) {
-    num_speakers = j["num_speakers"].get<int>();
+    int parsed_num_speakers = j["num_speakers"].get<int>();
+    if (parsed_num_speakers < 1 || parsed_num_speakers > 1024) {
+      throw std::runtime_error(
+          "Piper config \"num_speakers\" must be in [1, 1024], got " +
+          std::to_string(parsed_num_speakers));
+    }
+    num_speakers = parsed_num_speakers;
   }
 }
 
@@ -445,18 +484,47 @@ void load_piper_onnx_json_bytes(
   }
   if (j.contains("inference") && j["inference"].is_object()) {
     const auto& inf = j["inference"];
+    // A-119: validate float inference values. NaN / infinity /
+    // out-of-range scales propagate straight into the resampler's
+    // output-length calculation. Reject at load time.
     if (inf.contains("noise_scale")) {
-      noise_scale = inf["noise_scale"].get<float>();
+      float v = inf["noise_scale"].get<float>();
+      if (!std::isfinite(v) || v < 0.0f || v > 10.0f) {
+        throw std::runtime_error(
+            "Piper config \"inference.noise_scale\" must be finite and "
+            "in [0, 10], got " + std::to_string(v));
+      }
+      noise_scale = v;
     }
     if (inf.contains("length_scale")) {
-      length_scale_default = inf["length_scale"].get<float>();
+      float v = inf["length_scale"].get<float>();
+      if (!std::isfinite(v) || v <= 0.0f || v > 10.0f) {
+        throw std::runtime_error(
+            "Piper config \"inference.length_scale\" must be positive "
+            "and finite, got " + std::to_string(v));
+      }
+      length_scale_default = v;
     }
     if (inf.contains("noise_w")) {
-      noise_w = inf["noise_w"].get<float>();
+      float v = inf["noise_w"].get<float>();
+      if (!std::isfinite(v) || v < 0.0f || v > 10.0f) {
+        throw std::runtime_error(
+            "Piper config \"inference.noise_w\" must be finite and "
+            "in [0, 10], got " + std::to_string(v));
+      }
+      noise_w = v;
     }
   }
+  // A-119: bounded num_speakers. A negative or oversized value
+  // flows into voice-id allocation; clamp to a sane range.
   if (j.contains("num_speakers")) {
-    num_speakers = j["num_speakers"].get<int>();
+    int parsed_num_speakers = j["num_speakers"].get<int>();
+    if (parsed_num_speakers < 1 || parsed_num_speakers > 1024) {
+      throw std::runtime_error(
+          "Piper config \"num_speakers\" must be in [1, 1024], got " +
+          std::to_string(parsed_num_speakers));
+    }
+    num_speakers = parsed_num_speakers;
   }
 }
 
