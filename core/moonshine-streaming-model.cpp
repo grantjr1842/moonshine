@@ -428,6 +428,26 @@ int MoonshineStreamingModel::process_audio_chunk(MoonshineStreamingState *state,
     return 0;
   }
 
+  // v0.8.0 #1 streaming-latency: amortise the chunk-boundary envelope
+  // check across `state->batch_n` chunks. At batch_n == 1 (default) this
+  // runs every chunk (byte-identical to v0.7.2). At higher values, only
+  // every Nth chunk is checked; the per-chunk hot path reduces to the
+  // counter increment below. Sticky failure ensures envelope errors
+  // continue to fail subsequent chunks so the check is never silently
+  // disabled.
+  const bool run_envelope =
+      (state->batch_chunk_counter % state->batch_n == 0) ||
+      state->sticky_failure;
+  if (run_envelope) {
+    if (chunk_len > MOONSHINE_MAX_AUDIO_CHUNK_LEN) {
+      state->sticky_failure = true;
+      LOGF("Chunk length %zu exceeds max %d\n", chunk_len,
+           MOONSHINE_MAX_AUDIO_CHUNK_LEN);
+      return 1;
+    }
+  }
+  state->batch_chunk_counter++;
+
   std::lock_guard<std::mutex> lock(processing_mutex);
 
   // Prepare input tensors

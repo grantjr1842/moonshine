@@ -25,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <vector>
 
@@ -574,6 +575,8 @@ int MoonshineModel::transcribe_wav(const char *wav_path, char **out_text) {
     LOGF("Failed to load WAV file '%s'\n", wav_path);
     return 1;
   }
+  const std::unique_ptr<float, decltype(&std::free)> wav_data_guard(
+      wav_data, &std::free);
   return transcribe(wav_data, wav_data_size, out_text);
 }
 

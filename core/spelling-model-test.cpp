@@ -8,6 +8,7 @@
 
 #include "debug-utils.h"
 #include "spelling-fusion.h"
+#include "spelling-model-validation.h"
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
@@ -56,6 +57,31 @@ std::vector<uint8_t> read_file(const std::string &path) {
 }
 
 }  // namespace
+
+TEST_CASE("spelling-model metadata validation boundaries") {
+  int32_t sample_rate = 0;
+  CHECK(spelling_model_validation::parse_sample_rate("8000", &sample_rate));
+  CHECK(sample_rate == 8000);
+  CHECK(spelling_model_validation::parse_sample_rate("48000", &sample_rate));
+  CHECK_FALSE(spelling_model_validation::parse_sample_rate("7999", &sample_rate));
+  CHECK_FALSE(spelling_model_validation::parse_sample_rate("48001", &sample_rate));
+  CHECK_FALSE(spelling_model_validation::parse_sample_rate("16000x", &sample_rate));
+
+  float clip_seconds = 0.0f;
+  CHECK(spelling_model_validation::parse_clip_seconds("30", &clip_seconds));
+  CHECK_FALSE(spelling_model_validation::parse_clip_seconds("nan", &clip_seconds));
+  CHECK_FALSE(spelling_model_validation::parse_clip_seconds("-1", &clip_seconds));
+  CHECK_FALSE(spelling_model_validation::parse_clip_seconds("30.1", &clip_seconds));
+
+  size_t target_samples = 0;
+  CHECK(spelling_model_validation::compute_target_samples(
+      48000, 30.0f, &target_samples));
+  CHECK(target_samples == spelling_model_validation::kMaxTargetSamples);
+  CHECK_FALSE(spelling_model_validation::compute_target_samples(
+      48000, 30.1f, &target_samples));
+  CHECK_FALSE(spelling_model_validation::validate_classes({}));
+  CHECK(spelling_model_validation::validate_classes({"a", "z"}));
+}
 
 TEST_CASE("spelling-model: load from path") {
   std::string path = find_model_path();

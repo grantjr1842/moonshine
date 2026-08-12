@@ -285,6 +285,9 @@ struct transcript_line_t {
 struct transcript_t {
   struct transcript_line_t *lines; /* All lines of the transcript. */
   uint64_t line_count;             /* Number of lines in the transcript.      */
+  /* Monotonically increasing stream snapshot revision. Clients can compare
+   * this value with their last observed revision to detect missed changes. */
+  uint64_t revision;
 };
 
 /* ------------------------------ FUNCTIONS -------------------------------- */

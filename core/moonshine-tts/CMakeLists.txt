@@ -115,6 +115,20 @@ function(moonshine_tts_add_test name)
   )
   target_link_libraries(${name} PRIVATE ${ARGN})
   add_test(NAME ${name} COMMAND ${name} WORKING_DIRECTORY "${MOONSHINE_MONOREPO_ROOT}")
+  # CMake may emit $ORIGIN in an executable's RUNPATH even when the linked
+  # ORT library lives elsewhere. Keep CTest self-contained by supplying the
+  # selected runtime directory explicitly for every registered TTS test.
+  if(MOONSHINE_TTS_ORT_LIB MATCHES "\\.so$")
+    get_filename_component(_moonshine_tts_ort_test_lib_dir
+      "${MOONSHINE_TTS_ORT_LIB}" DIRECTORY)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${_moonshine_tts_ort_test_lib_dir}")
+    elseif(APPLE)
+      set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "DYLD_LIBRARY_PATH=${_moonshine_tts_ort_test_lib_dir}")
+    endif()
+  endif()
 endfunction()
 
 moonshine_tts_add_test(utf8_utils_test moonshine_tts_core)

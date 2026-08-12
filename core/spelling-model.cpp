@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -17,6 +18,7 @@
 #include "moonshine-tensor-view.h"
 #include "ort-utils.h"
 #include "spelling-fusion-data.h"
+#include "spelling-model-validation.h"
 
 namespace {
 
@@ -37,7 +39,6 @@ std::optional<std::string> lookup_metadata(const OrtApi *ort_api,
   if (raw == nullptr) return std::nullopt;
   std::string out(raw);
   allocator->Free(allocator, raw);
-  if (out.empty()) return std::nullopt;
   return out;
 }
 
@@ -161,9 +162,10 @@ void SpellingModel::apply_default_metadata() {
   input_name_ = meta.input_name;
   output_name_ = meta.output_name;
   classes_ = meta.classes;
-  target_samples_ =
-      static_cast<size_t>(std::lround(sample_rate_ * clip_seconds_));
-  if (target_samples_ == 0) target_samples_ = 1;
+  if (!spelling_model_validation::compute_target_samples(
+          sample_rate_, clip_seconds_, &target_samples_)) {
+    throw std::runtime_error("invalid compiled spelling-model metadata");
+  }
 }
 
 int SpellingModel::load(const char *model_path) {
@@ -184,9 +186,8 @@ int SpellingModel::load_from_memory(const uint8_t *model_data,
 }
 
 int SpellingModel::populate_metadata_from_session() {
-  // Best-effort overrides from the model's custom_metadata_map. Any
-  // failure leaves the compiled-in defaults in place; the model still
-  // works as long as the trainer kept the canonical waveform shape.
+  // Read overrides into temporary values and commit only after every value
+  // passes the same bounds used by the inference path.
   OrtModelMetadata *meta = nullptr;
   OrtStatus *status = ort_api_->SessionGetModelMetadata(ort_session_, &meta);
   if (status != nullptr) {
@@ -201,42 +202,57 @@ int SpellingModel::populate_metadata_from_session() {
     return 0;
   }
 
+  auto reject_metadata = [&]() {
+    ort_api_->ReleaseModelMetadata(meta);
+    return -1;
+  };
+  int32_t next_sample_rate = sample_rate_;
+  float next_clip_seconds = clip_seconds_;
+  std::string next_input_name = input_name_;
+  std::string next_output_name = output_name_;
+  std::vector<std::string> next_classes = classes_;
+
   if (auto v = lookup_metadata(ort_api_, meta, allocator, "sample_rate");
-      v.has_value()) {
-    try {
-      sample_rate_ = std::stoi(*v);
-    } catch (const std::exception &) {
-      // Ignore — keep default.
-    }
+      v.has_value() &&
+      !spelling_model_validation::parse_sample_rate(*v, &next_sample_rate)) {
+    return reject_metadata();
   }
   if (auto v = lookup_metadata(ort_api_, meta, allocator, "clip_seconds");
-      v.has_value()) {
-    try {
-      clip_seconds_ = std::stof(*v);
-    } catch (const std::exception &) {
-      // Ignore — keep default.
-    }
+      v.has_value() && !spelling_model_validation::parse_clip_seconds(
+                            *v, &next_clip_seconds)) {
+    return reject_metadata();
   }
   if (auto v = lookup_metadata(ort_api_, meta, allocator, "input_name");
       v.has_value()) {
-    input_name_ = *v;
+    if (v->empty()) return reject_metadata();
+    next_input_name = *v;
   }
   if (auto v = lookup_metadata(ort_api_, meta, allocator, "output_name");
       v.has_value()) {
-    output_name_ = *v;
+    if (v->empty()) return reject_metadata();
+    next_output_name = *v;
   }
   if (auto v = lookup_metadata(ort_api_, meta, allocator, "classes");
       v.has_value()) {
     auto parsed = parse_class_list_json(*v);
-    if (!parsed.empty()) {
-      classes_ = std::move(parsed);
+    if (!spelling_model_validation::validate_classes(parsed)) {
+      return reject_metadata();
     }
+    next_classes = std::move(parsed);
   }
 
+  size_t next_target_samples = 0;
+  if (!spelling_model_validation::compute_target_samples(
+          next_sample_rate, next_clip_seconds, &next_target_samples)) {
+    return reject_metadata();
+  }
   ort_api_->ReleaseModelMetadata(meta);
-  target_samples_ =
-      static_cast<size_t>(std::lround(sample_rate_ * clip_seconds_));
-  if (target_samples_ == 0) target_samples_ = 1;
+  sample_rate_ = next_sample_rate;
+  clip_seconds_ = next_clip_seconds;
+  input_name_ = std::move(next_input_name);
+  output_name_ = std::move(next_output_name);
+  classes_ = std::move(next_classes);
+  target_samples_ = next_target_samples;
   return 0;
 }
 

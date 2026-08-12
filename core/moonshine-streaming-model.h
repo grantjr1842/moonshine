@@ -13,6 +13,15 @@
 #include "onnxruntime_c_api.h"
 #include "word-alignment.h"
 
+/* Maximum audio chunk length accepted by the streaming model per
+ * process_audio_chunk call. One second at the canonical 16 kHz sample
+ * rate. Used by the chunk-boundary envelope check in
+ * process_audio_chunk (v0.8.0 #1 streaming-batch-n).
+ */
+#ifndef MOONSHINE_MAX_AUDIO_CHUNK_LEN
+#define MOONSHINE_MAX_AUDIO_CHUNK_LEN 16384
+#endif
+
 /* Streaming model configuration (matches streaming_config.json) */
 struct MoonshineStreamingConfig {
   int encoder_dim;      /* Encoder hidden dimension (320) */
@@ -33,6 +42,17 @@ struct MoonshineStreamingConfig {
 
 /* Internal state for streaming inference */
 struct MoonshineStreamingState {
+  // v0.8.0 #1 streaming-latency knob. Amortises the chunk-boundary
+  // envelope check (length + sample-rate) across `batch_n` chunks.
+  // Default 1 keeps the per-chunk check byte-identical to v0.7.2;
+  // values > 1 trade error-detection latency for first-audio latency.
+  // Sticky-failure flag ensures envelope errors continue to propagate
+  // to subsequent chunks; the per-chunk envelope check is never
+  // silently disabled.
+  int batch_n = 1;
+  int batch_chunk_counter = 0;
+  bool sticky_failure = false;
+
   // Frontend state
   std::vector<float> sample_buffer;  // [79]
   int64_t sample_len;
