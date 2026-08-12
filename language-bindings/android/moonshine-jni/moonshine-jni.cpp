@@ -367,12 +367,18 @@ Java_ai_moonshine_voice_JNI_moonshineLoadTranscriberFromFiles(
     jfieldID valueField =
         get_field(env, optionClass, "value", "Ljava/lang/String;");
 
+    // A-039: track every jstring acquired via GetObjectField so we
+    // can ReleaseStringUTFChars + DeleteLocalRef deterministically.
+    std::vector<jstring> jhold;
+    jhold.reserve(joptions != nullptr ? env->GetArrayLength(joptions) * 2 : 0);
     std::vector<moonshine_option_t> coptions;
     if (joptions != nullptr) {
       for (int i = 0; i < env->GetArrayLength(joptions); i++) {
         jobject joption = env->GetObjectArrayElement(joptions, i);
         jstring jname = (jstring)env->GetObjectField(joption, nameField);
         jstring jvalue = (jstring)env->GetObjectField(joption, valueField);
+        jhold.push_back(jname);
+        jhold.push_back(jvalue);
         coptions.push_back({env->GetStringUTFChars(jname, nullptr),
                             env->GetStringUTFChars(jvalue, nullptr)});
       }
@@ -383,9 +389,23 @@ Java_ai_moonshine_voice_JNI_moonshineLoadTranscriberFromFiles(
     } else {
       path_str = nullptr;
     }
-    return moonshine_load_transcriber_from_files(
+    const int32_t handle = moonshine_load_transcriber_from_files(
         path_str, model_arch, coptions.data(), coptions.size(),
         MOONSHINE_HEADER_VERSION);
+    // Release every jstring we acquired before returning so the JVM
+    // doesn't accumulate local-ref slots across repeated calls.
+    for (size_t i = 0; i < coptions.size(); i++) {
+      if (jhold[2 * i] != nullptr) {
+        env->ReleaseStringUTFChars(jhold[2 * i], coptions[i].name);
+      }
+      if (jhold[2 * i + 1] != nullptr) {
+        env->ReleaseStringUTFChars(jhold[2 * i + 1], coptions[i].value);
+      }
+    }
+    if (path != nullptr) {
+      env->ReleaseStringUTFChars(path, path_str);
+    }
+    return handle;
   } catch (const std::exception &e) {
     ALOGE("moonshineLoadTranscriberFromFiles: %s\n", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
