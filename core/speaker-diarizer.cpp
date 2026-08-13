@@ -60,11 +60,18 @@ struct SpeakerDiarizer::Impl {
     std::map<int32_t, uint64_t> label_to_stable_id;
     // Cached output turns for the last mapped snapshot.
     std::vector<SpeakerTurn> cached_turns;
+    // Per-stream mutex so concurrent finish_stream / diarize / map
+    // operations on DIFFERENT streams don't serialize through the
+    // diarizer-wide lock. Operations on the same stream still serialize
+    // through this lock.
+    std::mutex mutex;
   };
 
   cppannote::CppAnnoteEngine engine;
   SpeakerDiarizerOptions options;
 
+  // Diarizer-wide lock now protects ONLY the stream map + ID counters;
+  // per-stream state is locked separately above.
   std::mutex mutex;
   std::map<int32_t, StreamState> streams;
   int32_t next_stream_id = 1;
@@ -89,13 +96,21 @@ struct SpeakerDiarizer::Impl {
     return config;
   }
 
-  StreamState &get_stream(int32_t stream_id) {
+  StreamState *find_stream(int32_t stream_id) {
     auto it = this->streams.find(stream_id);
     if (it == this->streams.end()) {
+      return nullptr;
+    }
+    return &it->second;
+  }
+
+  StreamState &get_stream(int32_t stream_id) {
+    StreamState *state = find_stream(stream_id);
+    if (state == nullptr) {
       throw std::runtime_error("SpeakerDiarizer: invalid stream ID " +
                                std::to_string(stream_id));
     }
-    return it->second;
+    return *state;
   }
 
   uint64_t allocate_stable_id() {
@@ -185,37 +200,67 @@ SpeakerDiarizer::~SpeakerDiarizer() = default;
 int32_t SpeakerDiarizer::create_stream() {
   std::lock_guard<std::mutex> lock(this->impl->mutex);
   const int32_t stream_id = this->impl->next_stream_id++;
-  Impl::StreamState state;
-  state.session = std::make_unique<cppannote::StreamingDiarizationSession>(
-      this->impl->engine, this->impl->session_config());
-  this->impl->streams.insert({stream_id, std::move(state)});
+  // StreamState contains a std::mutex (non-movable / non-copyable),
+  // so emplace the key + construct the value in-place inside the
+  // map node (no copy / move of StreamState across the API boundary).
+  auto [it, inserted] = this->impl->streams.try_emplace(stream_id);
+  (void)inserted;
+  it->second.session =
+      std::make_unique<cppannote::StreamingDiarizationSession>(
+          this->impl->engine, this->impl->session_config());
   return stream_id;
 }
 
 void SpeakerDiarizer::free_stream(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->impl->mutex);
-  this->impl->streams.erase(stream_id);
+  Impl::StreamState *state = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(this->impl->mutex);
+    state = this->impl->find_stream(stream_id);
+    if (state != nullptr) {
+      // Take the per-stream lock while still holding impl->mutex so the
+      // StreamState pointer stays valid (no concurrent create_stream /
+      // free_stream can race because they're all serialized on impl->mutex).
+      state->mutex.lock();
+      this->impl->streams.erase(stream_id);
+      state->mutex.unlock();
+    }
+  }
+  // state pointer is dangling after erase; do not touch.
 }
 
 void SpeakerDiarizer::start_stream(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->impl->mutex);
-  Impl::StreamState &state = this->impl->get_stream(stream_id);
-  state.session->start_session();
-  state.mapped_generation = -1;
-  state.mapped_turns.clear();
-  state.label_to_stable_id.clear();
-  state.cached_turns.clear();
+  Impl::StreamState *state = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(this->impl->mutex);
+    state = this->impl->find_stream(stream_id);
+  }
+  if (state == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> stream_lock(state->mutex);
+  state->session->start_session();
+  state->mapped_generation = -1;
+  state->mapped_turns.clear();
+  state->label_to_stable_id.clear();
+  state->cached_turns.clear();
 }
 
 void SpeakerDiarizer::add_audio_to_stream(int32_t stream_id,
                                           const float *audio_data,
                                           uint64_t audio_length,
                                           int32_t sample_rate) {
-  std::lock_guard<std::mutex> lock(this->impl->mutex);
-  Impl::StreamState &state = this->impl->get_stream(stream_id);
+  Impl::StreamState *state = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(this->impl->mutex);
+    state = this->impl->find_stream(stream_id);
+  }
+  if (state == nullptr) {
+    return;
+  }
+  std::lock_guard<std::mutex> stream_lock(state->mutex);
   try {
-    state.session->add_audio_chunk(audio_data, (size_t)(audio_length),
-                                   sample_rate);
+    state->session->add_audio_chunk(audio_data, (size_t)(audio_length),
+                                    sample_rate);
   } catch (const std::exception &e) {
     // A clustering refresh can fail when there isn't enough speech yet (for
     // example an all-silence buffer). The audio is still cached, and the
@@ -225,21 +270,35 @@ void SpeakerDiarizer::add_audio_to_stream(int32_t stream_id,
 }
 
 std::vector<SpeakerTurn> SpeakerDiarizer::get_turns(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->impl->mutex);
-  Impl::StreamState &state = this->impl->get_stream(stream_id);
-  this->impl->map_snapshot_to_stable_ids(state, state.session->snapshot());
-  return state.cached_turns;
+  Impl::StreamState *state = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(this->impl->mutex);
+    state = this->impl->find_stream(stream_id);
+  }
+  if (state == nullptr) {
+    return {};
+  }
+  std::lock_guard<std::mutex> stream_lock(state->mutex);
+  this->impl->map_snapshot_to_stable_ids(*state, state->session->snapshot());
+  return state->cached_turns;
 }
 
 std::vector<SpeakerTurn> SpeakerDiarizer::finish_stream(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->impl->mutex);
-  Impl::StreamState &state = this->impl->get_stream(stream_id);
+  Impl::StreamState *state = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(this->impl->mutex);
+    state = this->impl->find_stream(stream_id);
+  }
+  if (state == nullptr) {
+    return {};
+  }
+  std::lock_guard<std::mutex> stream_lock(state->mutex);
   try {
-    this->impl->map_snapshot_to_stable_ids(state, state.session->end_session());
+    this->impl->map_snapshot_to_stable_ids(*state, state->session->end_session());
   } catch (const std::exception &e) {
     LOGF("Final speaker diarization pass failed: %s", e.what());
   }
-  return state.cached_turns;
+  return state->cached_turns;
 }
 
 std::vector<SpeakerTurn> SpeakerDiarizer::diarize(const float *audio_data,
