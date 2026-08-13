@@ -633,14 +633,37 @@ void Transcriber::start_stream(int32_t stream_id) {
 }
 
 void Transcriber::stop_stream(int32_t stream_id) {
-  std::lock_guard<std::mutex> lock(this->streams_mutex);
-  TranscriberStream *stream = this->streams[stream_id];
+  // Resolve the stream pointer under streams_mutex, then drop the lock
+  // before calling stream->stop() / finish_stream(). Holding streams_mutex
+  // across the stop + finish_stream serializes all concurrent stops
+  // through a single mutex, which deadlocks
+  // `concurrent_stops_keep_an_independent_connection_responsive` in
+  // `tests/e2e_load.rs` (8 concurrent stops × ~2.5 s finish_stream =
+  // ~20 s, just at the 30 s test deadline). The map lookup is safe
+  // to release before the long-running work because the stream
+  // pointer stays valid until free_stream() is called for the same id
+  // (and free_stream() takes the same mutex).
+  TranscriberStream *stream = nullptr;
+  int32_t diarizer_stream_id = -1;
+  SpeakerDiarizer *diarizer = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(this->streams_mutex);
+    auto it = this->streams.find(stream_id);
+    if (it != this->streams.end()) {
+      stream = it->second;
+      diarizer = this->speaker_diarizer;
+      diarizer_stream_id = stream->diarizer_stream_id;
+    }
+  }
+  if (stream == nullptr) {
+    return;
+  }
   stream->stop();
   stream->save_audio_data_to_wav(nullptr, 0, 0);
-  if (this->speaker_diarizer != nullptr && stream->diarizer_stream_id >= 0) {
+  if (diarizer != nullptr && diarizer_stream_id >= 0) {
     // Run a final clustering pass so the next transcribe_stream call picks up
     // the finalized speaker spans.
-    this->speaker_diarizer->finish_stream(stream->diarizer_stream_id);
+    diarizer->finish_stream(diarizer_stream_id);
   }
 }
 
