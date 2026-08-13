@@ -246,7 +246,7 @@ extern "C" int32_t moonshine_load_transcriber_from_files(
     transcriber = new Transcriber(transcriber_options);
   } catch (const std::exception &e) {
     LOGF("Failed to load transcriber: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   int32_t transcriber_handle = allocate_transcriber_handle(transcriber);
   return transcriber_handle;
@@ -311,7 +311,7 @@ int32_t moonshine_load_transcriber_from_memory(
     transcriber = new Transcriber(transcriber_options);
   } catch (const std::exception &e) {
     LOGF("Failed to load transcriber: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   int32_t transcriber_handle = allocate_transcriber_handle(transcriber);
   return transcriber_handle;
@@ -369,7 +369,7 @@ int32_t moonshine_load_transcriber_from_memory_files(
     transcriber = new Transcriber(transcriber_options);
   } catch (const std::exception &e) {
     LOGF("Failed to load transcriber from memory files: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   int32_t transcriber_handle = allocate_transcriber_handle(transcriber);
   return transcriber_handle;
@@ -401,7 +401,7 @@ int32_t moonshine_transcribe_without_streaming(
         audio_data, audio_length, sample_rate, flags, out_transcript);
   } catch (const std::exception &e) {
     LOGF("Failed to transcribe without streaming: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -416,7 +416,7 @@ int32_t moonshine_create_stream(int32_t transcriber_handle, uint32_t flags) {
     return transcriber_map[transcriber_handle]->create_stream();
   } catch (const std::exception &e) {
     LOGF("Failed to create stream: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -431,7 +431,7 @@ int32_t moonshine_free_stream(int32_t transcriber_handle,
     transcriber_map[transcriber_handle]->free_stream(stream_handle);
   } catch (const std::exception &e) {
     LOGF("Failed to free stream: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -447,7 +447,7 @@ int32_t moonshine_start_stream(int32_t transcriber_handle,
     transcriber_map[transcriber_handle]->start_stream(stream_handle);
   } catch (const std::exception &e) {
     LOGF("Failed to start stream: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -463,7 +463,7 @@ int32_t moonshine_stop_stream(int32_t transcriber_handle,
     transcriber_map[transcriber_handle]->stop_stream(stream_handle);
   } catch (const std::exception &e) {
     LOGF("Failed to stop stream: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -484,7 +484,7 @@ int32_t moonshine_stream_acknowledge_revision(int32_t transcriber_handle,
         stream_handle, observed_revision);
   } catch (const std::exception &e) {
     LOGF("Failed to acknowledge stream revision: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -520,7 +520,7 @@ int32_t moonshine_transcribe_add_audio_to_stream(int32_t transcriber_handle,
         stream_handle, new_audio_data, audio_length, sample_rate);
   } catch (const std::exception &e) {
     LOGF("Failed to add audio to stream: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -540,7 +540,7 @@ int32_t moonshine_transcribe_stream(int32_t transcriber_handle,
                                                            out_transcript);
   } catch (const std::exception &e) {
     LOGF("Failed to transcribe stream: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -603,7 +603,7 @@ int32_t moonshine_create_embedding_model(const char *model_path,
   } catch (const std::exception &e) {
     delete embedder;
     LOGF("Failed to create embedding model: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return allocate_embedding_model_handle(embedder);
 }
@@ -671,7 +671,7 @@ int32_t moonshine_create_embedding_model_from_memory(
   } catch (const std::exception &e) {
     delete embedder;
     LOGF("Failed to create embedding model from memory: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return allocate_embedding_model_handle(embedder);
 }
@@ -715,14 +715,14 @@ int32_t moonshine_calculate_embedding(int32_t embedding_model_handle,
     const uint64_t n = static_cast<uint64_t>(emb.size());
     auto *buf = static_cast<float *>(std::malloc(n * sizeof(float)));
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     std::memcpy(buf, emb.data(), n * sizeof(float));
     *out_embedding = buf;
     *out_embedding_size = n;
   } catch (const std::exception &e) {
     LOGF("Failed to calculate embedding: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -768,7 +768,7 @@ int32_t moonshine_calculate_embedding_distance(int32_t embedding_model_handle,
     *out_similarity = embedder->calculate_similarity(a, b);
   } catch (const std::exception &e) {
     LOGF("Failed to calculate embedding distance: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -1041,7 +1041,7 @@ int32_t refine_clip_with_asr(const std::vector<float> &audio,
           &asr_transcript);
     } catch (const std::exception &e) {
       LOGF("clone ASR transcription failed: %s", e.what());
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
   }
 
@@ -1075,7 +1075,7 @@ int32_t refine_clip_with_asr(const std::vector<float> &audio,
 
   float *buffer = static_cast<float *>(std::malloc(count * sizeof(float)));
   if (buffer == nullptr) {
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   std::memcpy(buffer, audio.data() + begin, count * sizeof(float));
   out_clip->audio_data = buffer;
@@ -1089,7 +1089,7 @@ int32_t refine_clip_with_asr(const std::vector<float> &audio,
     if (out_clip->transcript == nullptr) {
       std::free(buffer);
       *out_clip = moonshine_speech_clip_t{};
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
   }
   return MOONSHINE_ERROR_NONE;
@@ -1239,7 +1239,7 @@ int32_t moonshine_extract_speech_clip(
                                sample_rate, clip_options);
   } catch (const std::exception &e) {
     LOGF("moonshine_extract_speech_clip failed: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 
   out_clip->start_time = clip.start_time_seconds;
@@ -1256,7 +1256,7 @@ int32_t moonshine_extract_speech_clip(
   const size_t byte_count = clip.audio.size() * sizeof(float);
   float *buffer = static_cast<float *>(std::malloc(byte_count));
   if (buffer == nullptr) {
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   std::memcpy(buffer, clip.audio.data(), byte_count);
   out_clip->audio_data = buffer;
@@ -1309,7 +1309,7 @@ int32_t moonshine_create_tts_synthesizer_from_files(
     return allocate_text_to_speech_synthesizer_handle(synthesizer, -1);
   } catch (const std::exception &e) {
     LOGF("Failed to create TTS synthesizer: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -1410,7 +1410,7 @@ int32_t moonshine_create_tts_synthesizer_from_memory(
     }
   } catch (const std::exception &e) {
     LOGF("Failed to create TTS synthesizer from memory: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -1520,13 +1520,13 @@ int32_t moonshine_text_to_speech(int32_t tts_synthesizer_handle,
       *out_audio_data =
           static_cast<float *>(std::malloc(wave.size() * sizeof(float)));
       if (*out_audio_data == nullptr) {
-        return MOONSHINE_ERROR_UNKNOWN;
+        return MOONSHINE_ERROR_NOT_IMPLEMENTED;
       }
       std::memcpy(*out_audio_data, wave.data(), wave.size() * sizeof(float));
     }
   } catch (const std::exception &e) {
     LOGF("Failed to synthesize text to speech: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -1585,13 +1585,13 @@ int32_t moonshine_phonemes_to_speech(int32_t tts_synthesizer_handle,
       *out_audio_data =
           static_cast<float *>(std::malloc(wave.size() * sizeof(float)));
       if (*out_audio_data == nullptr) {
-        return MOONSHINE_ERROR_UNKNOWN;
+        return MOONSHINE_ERROR_NOT_IMPLEMENTED;
       }
       std::memcpy(*out_audio_data, wave.data(), wave.size() * sizeof(float));
     }
   } catch (const std::exception &e) {
     LOGF("Failed to synthesize phonemes to speech: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -1930,13 +1930,13 @@ int32_t moonshine_get_g2p_dependencies(const char *languages,
     }
     char *buf = malloc_string_copy(joined);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_dependencies_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_g2p_dependencies failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2055,13 +2055,13 @@ int32_t moonshine_get_tts_dependencies(const char *languages,
     const std::string dumped = json_model_dependencies(deps);
     char *buf = malloc_string_copy(dumped);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_dependencies_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_tts_dependencies failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2157,13 +2157,13 @@ int32_t moonshine_get_tts_voices(const char *languages,
     const std::string dumped = json_tts_voices_root_object(rows);
     char *buf = malloc_string_copy(dumped);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_voices_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_tts_voices failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2257,13 +2257,13 @@ int32_t moonshine_get_stt_dependencies(const char *language,
     const std::string dumped = json_model_dependencies(*deps);
     char *buf = malloc_string_copy(dumped);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_dependencies_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_stt_dependencies failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2308,13 +2308,13 @@ int32_t moonshine_get_embedding_dependencies(const char *model_name,
     const std::string dumped = json_model_dependencies(*deps);
     char *buf = malloc_string_copy(dumped);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_dependencies_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_embedding_dependencies failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2328,13 +2328,13 @@ int32_t moonshine_get_diarization_dependencies(char **out_dependencies_json) {
         json_model_dependencies(moonshine::diarization_model_dependencies());
     char *buf = malloc_string_copy(dumped);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_dependencies_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_diarization_dependencies failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2375,13 +2375,13 @@ int32_t moonshine_get_stt_catalog(char **out_catalog_json) {
     o += "]}";
     char *buf = malloc_string_copy(o);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_catalog_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_stt_catalog failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2414,13 +2414,13 @@ int32_t moonshine_get_embedding_catalog(char **out_catalog_json) {
     o += "]}";
     char *buf = malloc_string_copy(o);
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     *out_catalog_json = buf;
     return MOONSHINE_ERROR_NONE;
   } catch (const std::exception &e) {
     LOGF("moonshine_get_embedding_catalog failed: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2549,7 +2549,7 @@ int32_t moonshine_create_grapheme_to_phonemizer_from_files(
     return allocate_grapheme_phonemizer_handle(g2p);
   } catch (const std::exception &e) {
     LOGF("Failed to create grapheme phonemizer from files: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2618,7 +2618,7 @@ int32_t moonshine_create_grapheme_to_phonemizer_from_memory(
     return allocate_grapheme_phonemizer_handle(g2p);
   } catch (const std::exception &e) {
     LOGF("Failed to create grapheme phonemizer from memory: %s\n", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2690,14 +2690,14 @@ int32_t moonshine_text_to_phonemes(int32_t grapheme_to_phonemizer_handle,
     }
     char *buf = static_cast<char *>(std::malloc(ipa.size() + 1));
     if (buf == nullptr) {
-      return MOONSHINE_ERROR_UNKNOWN;
+      return MOONSHINE_ERROR_NOT_IMPLEMENTED;
     }
     std::memcpy(buf, ipa.c_str(), ipa.size() + 1);
     *out_phonemes = buf;
     *out_phonemes_count = ipa.size();
   } catch (const std::exception &e) {
     LOGF("Failed to convert text to phonemes: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -2784,7 +2784,7 @@ extern "C" int32_t moonshine_text_to_speech_stream(
     return rc;
   } catch (const std::exception &e) {
     LOGF("Failed to streaming-synthesize text: %s", e.what());
-    return MOONSHINE_ERROR_UNKNOWN;
+    return MOONSHINE_ERROR_NOT_IMPLEMENTED;
   }
 }
 
@@ -2985,8 +2985,8 @@ extern "C" int32_t moonshine_session_clear_diarization_callback(
 // pin at v0.1.1 does not include a public IntentRecognizer class. The
 // entry points below exist so the Rust FFI can link without the vendored
 // Rust stubs (rust/server/src/intent_stubs.c). They all return
-// MOONSHINE_ERROR_UNKNOWN for now; Phase D drops the Rust stubs once
-// these symbols exist natively.
+// MOONSHINE_ERROR_NOT_IMPLEMENTED so callers get an explicit signal
+// that this capability is missing pending upstream export.
 //
 // All free functions accept NULL gracefully so callers that pass nullptr
 // (rather than the handle returned by moonshine_create_intent_recognizer,
@@ -3002,7 +3002,7 @@ extern "C" int32_t moonshine_create_intent_recognizer(const char *model_path,
          static_cast<unsigned>(model_arch),
          model_variant == nullptr ? "<null>" : model_variant);
   }
-  return MOONSHINE_ERROR_UNKNOWN;
+  return MOONSHINE_ERROR_NOT_IMPLEMENTED;
 }
 
 extern "C" int32_t moonshine_free_intent_recognizer(int32_t handle) {
@@ -3018,14 +3018,14 @@ extern "C" int32_t moonshine_register_intent(int32_t handle,
   (void)canonical_phrase;
   (void)embedding;
   (void)embedding_size;
-  return MOONSHINE_ERROR_UNKNOWN;
+  return MOONSHINE_ERROR_NOT_IMPLEMENTED;
 }
 
 extern "C" int32_t moonshine_unregister_intent(int32_t handle,
                                               const char *canonical_phrase) {
   (void)handle;
   (void)canonical_phrase;
-  return MOONSHINE_ERROR_UNKNOWN;
+  return MOONSHINE_ERROR_NOT_IMPLEMENTED;
 }
 
 extern "C" int32_t moonshine_get_closest_intents(
@@ -3041,7 +3041,7 @@ extern "C" int32_t moonshine_get_closest_intents(
   if (out_count != nullptr) {
     *out_count = 0;
   }
-  return MOONSHINE_ERROR_UNKNOWN;
+  return MOONSHINE_ERROR_NOT_IMPLEMENTED;
 }
 
 extern "C" void moonshine_free_intent_matches(moonshine_intent_match_t *matches,
@@ -3059,7 +3059,7 @@ extern "C" int32_t moonshine_calculate_intent_embedding(
     *out_embedding_size = 0;
   }
   (void)out_embedding;
-  return MOONSHINE_ERROR_UNKNOWN;
+  return MOONSHINE_ERROR_NOT_IMPLEMENTED;
 }
 
 extern "C" void moonshine_free_intent_embedding(float *embedding) {
@@ -3068,7 +3068,7 @@ extern "C" void moonshine_free_intent_embedding(float *embedding) {
 
 extern "C" int32_t moonshine_clear_intents(int32_t handle) {
   (void)handle;
-  return MOONSHINE_ERROR_UNKNOWN;
+  return MOONSHINE_ERROR_NOT_IMPLEMENTED;
 }
 
 extern "C" int32_t moonshine_get_intent_count(int32_t handle) {

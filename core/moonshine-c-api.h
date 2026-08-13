@@ -116,6 +116,7 @@ extern "C" {
 #define MOONSHINE_ERROR_UNKNOWN (-1)
 #define MOONSHINE_ERROR_INVALID_HANDLE (-2)
 #define MOONSHINE_ERROR_INVALID_ARGUMENT (-3)
+#define MOONSHINE_ERROR_NOT_IMPLEMENTED (-4)
 
 /* Flags.                                                                */
 #define MOONSHINE_FLAG_FORCE_UPDATE (1 << 0)
