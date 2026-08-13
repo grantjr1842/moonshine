@@ -60,6 +60,7 @@ add_library(moonshine_tts_core STATIC
 target_include_directories(moonshine_tts_core PUBLIC
   ${_MOONSHINE_TTS_ROOT}/src
   ${_MOONSHINE_TTS_ROOT}/src/lang-specific
+  ${_MOONSHINE_CORE_ROOT}
   ${_MOONSHINE_CORE_ROOT}/third-party
 )
 target_include_directories(moonshine_tts_core PRIVATE

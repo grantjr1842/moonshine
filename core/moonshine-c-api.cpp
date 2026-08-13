@@ -2701,3 +2701,131 @@ int32_t moonshine_text_to_phonemes(int32_t grapheme_to_phonemizer_handle,
   }
   return MOONSHINE_ERROR_NONE;
 }
+
+// ─── TTS streaming + per-session VAD/diarization state ────────────────────
+//
+// These entry points close the gap left by the
+// `tts_streaming_stubs.c` / `spec_d_shape2_stubs.c` vendored stubs in
+// moonshine-rs. They are intentionally simple: the Kokoro path emits one
+// callback per phoneme chunk via the existing internal chunked pipeline;
+// the Piper / ZipVoice path emits one final-chunk callback. Future work
+// can hoist the chunked emission into the C-ABI path for true streaming.
+
+extern "C" bool moonshine_tts_supports_streaming(int32_t handle) {
+  if (log_api_calls) {
+    LOGF("moonshine_tts_supports_streaming(handle=%d)", handle);
+  }
+  moonshine_tts::MoonshineTTS *synth = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(text_to_speech_synthesizer_map_mutex);
+    auto _it = text_to_speech_synthesizer_map.find(handle);
+    if (_it != text_to_speech_synthesizer_map.end()) {
+      synth = _it->second;
+    }
+  }
+  if (synth == nullptr) {
+    return false;
+  }
+  return synth->supports_streaming();
+}
+
+namespace {
+
+}  // namespace
+
+extern "C" int32_t moonshine_text_to_speech_stream(
+    int32_t handle, const char *text, const moonshine_option_t *options,
+    uint64_t options_count, moonshine_tts_chunk_callback_t on_chunk,
+    void *user_data, int32_t *out_sample_rate_hz) {
+  if (log_api_calls) {
+    LOGF("moonshine_text_to_speech_stream(handle=%d, text=%s, options=%p, "
+         "options_count=%" PRIu64 ", on_chunk=%p, user_data=%p, "
+         "out_sample_rate_hz=%p)",
+         handle, text == nullptr ? "<null>" : text,
+         static_cast<const void *>(options), options_count,
+         reinterpret_cast<const void *>(on_chunk), user_data,
+         static_cast<void *>(out_sample_rate_hz));
+  }
+  if (text == nullptr || on_chunk == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  if (options_count > 0 && options == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  moonshine_tts::MoonshineTTS *synth = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(text_to_speech_synthesizer_map_mutex);
+    auto _it = text_to_speech_synthesizer_map.find(handle);
+    if (_it != text_to_speech_synthesizer_map.end()) {
+      synth = _it->second;
+    }
+  }
+  if (synth == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  try {
+    const std::vector<std::pair<std::string, std::string>> tts_pairs =
+        tts_option_pairs_from_c(options, options_count);
+    // The C++ ChunkCallback and the C moonshine_tts_chunk_callback_t have
+    // identical signatures (bool(const float*, uint64_t, int32_t, bool,
+    // void*)) and identical ABIs, so we can pass the C pointer directly
+    // without an adapter thunk.
+    int32_t rc = tts_pairs.empty()
+                     ? synth->synthesize_stream(
+                           text, reinterpret_cast<moonshine_tts::MoonshineTTS::ChunkCallback>(on_chunk),
+                           user_data)
+                     : synth->synthesize_stream(
+                           text, reinterpret_cast<moonshine_tts::MoonshineTTS::ChunkCallback>(on_chunk),
+                           user_data, tts_pairs);
+    if (out_sample_rate_hz != nullptr) {
+      *out_sample_rate_hz =
+          static_cast<int32_t>(moonshine_tts::MoonshineTTS::kSampleRateHz);
+    }
+    return rc;
+  } catch (const std::exception &e) {
+    LOGF("Failed to streaming-synthesize text: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+}
+
+extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
+                                                  int32_t stream_handle,
+                                                  int32_t *out_state,
+                                                  int64_t *out_timestamp_ms) {
+  if (log_api_calls) {
+    LOGF("moonshine_session_get_vad_state(transcriber=%d, stream=%d)",
+         transcriber_handle, stream_handle);
+  }
+  if (out_state == nullptr || out_timestamp_ms == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  // The per-stream VAD state lives on the native Stream object. Until
+  // moonshine_session_get_vad_state is wired into Stream (planned for
+  // Phase B), this stub returns UNKNOWN so callers can detect the
+  // missing capability rather than silently seeing zeros.
+  (void)transcriber_handle;
+  (void)stream_handle;
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" int32_t moonshine_session_get_diarization_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    char *out_speaker_id, uint64_t *out_speaker_id_capacity,
+    int64_t *out_finalized_at_ms) {
+  (void)out_speaker_id;
+  if (log_api_calls) {
+    LOGF("moonshine_session_get_diarization_state(transcriber=%d, stream=%d)",
+         transcriber_handle, stream_handle);
+  }
+  if (out_state == nullptr || out_speaker_id_capacity == nullptr ||
+      out_finalized_at_ms == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  // Same Phase B caveat as moonshine_session_get_vad_state.
+  (void)transcriber_handle;
+  (void)stream_handle;
+  *out_state = 0;
+  *out_speaker_id_capacity = 0;
+  *out_finalized_at_ms = 0;
+  return MOONSHINE_ERROR_UNKNOWN;
+}

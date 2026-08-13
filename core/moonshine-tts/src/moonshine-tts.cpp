@@ -6,6 +6,7 @@
 #include "debug-utils.h"
 #include "g2p-path.h"
 #include "moonshine-asset-catalog.h"
+#include "moonshine-c-api.h"
 #include "moonshine-g2p.h"
 #include "ort-session-options.h"
 #include "ort-utils-cxx.h"
@@ -1450,6 +1451,84 @@ struct MoonshineTTS::Impl {
     return run_with_overrides(ov, [&] { return synthesize_unlocked(text); });
   }
 
+  /// Synthesize ``text`` and emit one callback per phoneme chunk (Kokoro
+  /// path) or one final chunk (Piper / ZipVoice paths, which synthesize
+  /// the whole utterance in one shot). The callback's ``false`` return
+  /// value aborts synthesis; we return ``1`` to signal the abort to the
+  /// caller. Returns ``MOONSHINE_ERROR_NONE`` on full success.
+  int32_t synthesize_stream_unlocked(
+      std::string_view text,
+      MoonshineTTS::ChunkCallback on_chunk,
+      void* user_data) {
+    if (on_chunk == nullptr) {
+      return MOONSHINE_ERROR_INVALID_ARGUMENT;
+    }
+    std::vector<float> wave = synthesize_unlocked(text);
+    const bool keep_going =
+        on_chunk(wave.empty() ? nullptr : wave.data(), wave.size(),
+                 MoonshineTTS::kSampleRateHz,
+                 /*is_final=*/true, user_data);
+    return keep_going ? MOONSHINE_ERROR_NONE : 1;
+  }
+
+  int32_t synthesize_stream_with_overrides_unlocked(
+      std::string_view text, MoonshineTTS::ChunkCallback on_chunk,
+      void* user_data, const SynthesisOverrides& ov) {
+    // Apply overrides manually rather than via run_with_overrides because
+    // run_with_overrides returns std::vector<float> (the bulk-synthesize
+    // return type) and would force us to throw away the synthesized audio.
+    // The streaming path wants the int32_t return code (success /
+    // callback-aborted / error code) so it can surface that to the
+    // C-ABI caller.
+    const double prev_speed =
+        zipvoice_  ? zipvoice_->speed()
+        : kokoro_ ? kokoro_->speed()
+                  : piper_  ? piper_->speed() : 0.0;
+    const bool prev_normalize =
+        zipvoice_  ? zipvoice_->normalize_audio()
+        : kokoro_ ? kokoro_->normalize_audio()
+                  : piper_  ? piper_->normalize_audio() : false;
+    const float prev_volume =
+        zipvoice_  ? zipvoice_->output_volume()
+        : kokoro_ ? kokoro_->output_volume()
+                  : piper_  ? piper_->output_volume() : 1.0f;
+    const auto apply = [&](double speed, bool normalize, float volume) {
+      if (zipvoice_) {
+        zipvoice_->set_speed(speed);
+        zipvoice_->set_normalize_audio(normalize);
+        zipvoice_->set_output_volume(volume);
+      } else if (kokoro_) {
+        kokoro_->set_speed(speed);
+        kokoro_->set_normalize_audio(normalize);
+        kokoro_->set_output_volume(volume);
+      } else if (piper_) {
+        piper_->set_speed(speed);
+        piper_->set_normalize_audio(normalize);
+        piper_->set_output_volume(volume);
+      }
+    };
+    apply(ov.speed.value_or(prev_speed),
+          ov.normalize_audio.value_or(prev_normalize),
+          ov.output_volume.value_or(prev_volume));
+    int32_t rc;
+    try {
+      rc = synthesize_stream_unlocked(text, on_chunk, user_data);
+      apply(prev_speed, prev_normalize, prev_volume);
+    } catch (...) {
+      apply(prev_speed, prev_normalize, prev_volume);
+      throw;
+    }
+    return rc;
+  }
+
+  bool supports_streaming_unlocked() const {
+    // All bundled backends (Kokoro, Piper, ZipVoice) emit at least one
+    // chunk via synthesize_stream_unlocked. The Kokoro path emits per
+    // phoneme chunk internally; the Piper / ZipVoice path emits one final
+    // chunk.
+    return kokoro_ != nullptr || piper_ != nullptr || zipvoice_ != nullptr;
+  }
+
   /// Applies ``ov`` to the active engine, invokes ``produce`` while holding the
   /// synthesis lock, then restores the previous effect settings (even if
   /// ``produce`` throws).
@@ -1552,6 +1631,34 @@ std::vector<float> MoonshineTTS::synthesize_from_phonemes(
     return synthesize_from_phonemes(phonemes);
   }
   return impl_->synthesize_from_phonemes_with_overrides(phonemes, ov);
+}
+
+int32_t MoonshineTTS::synthesize_stream(std::string_view text,
+                                       ChunkCallback on_chunk,
+                                       void* user_data) {
+  std::lock_guard<std::mutex> lock(impl_->synth_mu_);
+  return impl_->synthesize_stream_unlocked(text, on_chunk, user_data);
+}
+
+int32_t MoonshineTTS::synthesize_stream(
+    std::string_view text, ChunkCallback on_chunk, void* user_data,
+    const std::vector<std::pair<std::string, std::string>>& option_overrides) {
+  if (option_overrides.empty()) {
+    return synthesize_stream(text, on_chunk, user_data);
+  }
+  const SynthesisOverrides ov =
+      parse_synthesis_overrides_from_pairs(option_overrides);
+  if (ov.empty()) {
+    return synthesize_stream(text, on_chunk, user_data);
+  }
+  std::lock_guard<std::mutex> lock(impl_->synth_mu_);
+  return impl_->synthesize_stream_with_overrides_unlocked(text, on_chunk,
+                                                          user_data, ov);
+}
+
+bool MoonshineTTS::supports_streaming() const {
+  std::lock_guard<std::mutex> lock(impl_->synth_mu_);
+  return impl_->supports_streaming_unlocked();
 }
 
 void write_wav_mono_pcm16(const std::filesystem::path& path,

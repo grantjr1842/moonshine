@@ -56,6 +56,38 @@ class MoonshineTTS {
       std::string_view phonemes,
       const std::vector<std::pair<std::string, std::string>>& option_overrides);
 
+  /// Per-chunk callback used by the streaming TTS path. Returns ``true`` to
+  /// continue receiving chunks, ``false`` to abort synthesis. ``samples`` /
+  /// ``sample_count`` are valid for the duration of the callback only.
+  /// ``sample_rate_hz`` is the engine sample rate (24 000 Hz for Kokoro /
+  /// Piper / ZipVoice). ``is_final`` is true for the last chunk; earlier
+  /// chunks have ``is_final == false``. ``user_data`` is the pointer the
+  /// caller passed to ``synthesize_stream``.
+  using ChunkCallback = bool (*)(const float* samples, uint64_t sample_count,
+                                int32_t sample_rate_hz, bool is_final,
+                                void* user_data);
+
+  /// Streaming TTS: synthesize ``text`` and emit one callback per phoneme
+  /// chunk (the existing internal chunked pipeline). Returns
+  /// ``MOONSHINE_ERROR_NONE`` if every chunk was emitted successfully, the
+  /// chunk callback's ``false`` return value (negated: ``1``) if a callback
+  /// aborted, or one of the engine's error codes on failure. The final
+  /// chunk's callback is invoked with ``is_final == true`` before this method
+  /// returns.
+  int32_t synthesize_stream(std::string_view text, ChunkCallback on_chunk,
+                            void* user_data);
+
+  /// ``synthesize_stream`` with per-call option overrides (same keys as
+  /// ``synthesize``: ``speed``, ``normalize_audio``, ``output_volume``).
+  int32_t synthesize_stream(
+      std::string_view text, ChunkCallback on_chunk, void* user_data,
+      const std::vector<std::pair<std::string, std::string>>& option_overrides);
+
+  /// Returns true if the active engine supports streaming synthesis (all
+  /// bundled backends do; useful for capability checks before calling
+  /// ``synthesize_stream``).
+  bool supports_streaming() const;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

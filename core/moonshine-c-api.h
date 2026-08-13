@@ -1189,6 +1189,53 @@ MOONSHINE_EXPORT int32_t moonshine_text_to_phonemes(
     const struct moonshine_option_t *options, uint64_t options_count,
     const char **out_phonemes, uint64_t *out_phonemes_count);
 
+/* Per-chunk callback used by the streaming TTS path. Returns ``true`` to
+   continue receiving chunks, ``false`` to abort synthesis. ``samples`` /
+   ``sample_count`` are valid for the duration of the callback only.
+   ``sample_rate_hz`` is the engine sample rate (24 000 Hz for Kokoro /
+   Piper / ZipVoice). ``is_final`` is true for the last chunk; earlier
+   chunks have ``is_final == false``. ``user_data`` is the pointer the
+   caller passed to ``moonshine_text_to_speech_stream``. */
+typedef bool (*moonshine_tts_chunk_callback_t)(const float *samples,
+                                              uint64_t sample_count,
+                                              int32_t sample_rate_hz,
+                                              bool is_final, void *user_data);
+
+/* Returns true if the active TTS engine on ``handle`` supports streaming
+   synthesis via ``moonshine_text_to_speech_stream``. Currently all bundled
+   backends (Kokoro, Piper, ZipVoice) do. */
+MOONSHINE_EXPORT bool moonshine_tts_supports_streaming(int32_t handle);
+
+/* Streaming TTS: synthesize ``text`` and invoke ``on_chunk`` once per
+   phoneme chunk (Kokoro path) or once with ``is_final = true`` for the
+   whole utterance (Piper / ZipVoice paths). Returns ``MOONSHINE_ERROR_NONE``
+   on success, ``1`` if the callback returned false to abort, or one of
+   the engine's error codes on failure (e.g. ``MOONSHINE_ERROR_INVALID_HANDLE``).
+   ``*out_sample_rate_hz`` is filled with the engine's sample rate. */
+MOONSHINE_EXPORT int32_t moonshine_text_to_speech_stream(
+    int32_t handle, const char *text,
+    const struct moonshine_option_t *options, uint64_t options_count,
+    moonshine_tts_chunk_callback_t on_chunk, void *user_data,
+    int32_t *out_sample_rate_hz);
+
+/* Reads the current VAD state for ``stream_handle`` under
+   ``transcriber_handle``. ``*out_state`` is 0 for "silence", 1 for
+   "speech", and ``*out_timestamp_ms`` is the frame timestamp in
+   milliseconds. Returns ``MOONSHINE_ERROR_NONE`` on success. */
+MOONSHINE_EXPORT int32_t moonshine_session_get_vad_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    int64_t *out_timestamp_ms);
+
+/* Reads the current diarization state for ``stream_handle`` under
+   ``transcriber_handle``. ``*out_state`` is 0 for "none", 1 for
+   "enrolled", 2 for "known"; ``out_speaker_id`` (length
+   ``*out_speaker_id_capacity``) receives the speaker id on success,
+   ``*out_speaker_id_capacity`` is updated to the required length. */
+MOONSHINE_EXPORT int32_t moonshine_session_get_diarization_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    char *out_speaker_id, uint64_t *out_speaker_id_capacity,
+    int64_t *out_finalized_at_ms);
+
 #ifdef __cplusplus
 }
 #endif
