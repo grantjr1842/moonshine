@@ -2799,13 +2799,25 @@ extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
   if (out_state == nullptr || out_timestamp_ms == nullptr) {
     return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
-  // The per-stream VAD state lives on the native Stream object. Until
-  // moonshine_session_get_vad_state is wired into Stream (planned for
-  // Phase B), this stub returns UNKNOWN so callers can detect the
-  // missing capability rather than silently seeing zeros.
-  (void)transcriber_handle;
-  (void)stream_handle;
-  return MOONSHINE_ERROR_UNKNOWN;
+  Transcriber *transcriber = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(transcriber_map_mutex);
+    auto _it = transcriber_map.find(transcriber_handle);
+    if (_it != transcriber_map.end()) {
+      transcriber = _it->second;
+    }
+  }
+  if (transcriber == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  std::lock_guard<std::mutex> _lk(stream->vad_mutex);
+  *out_state = stream->last_vad_state;
+  *out_timestamp_ms = stream->last_vad_timestamp_ms;
+  return MOONSHINE_ERROR_NONE;
 }
 
 extern "C" int32_t moonshine_session_get_diarization_state(
@@ -2821,11 +2833,245 @@ extern "C" int32_t moonshine_session_get_diarization_state(
       out_finalized_at_ms == nullptr) {
     return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
-  // Same Phase B caveat as moonshine_session_get_vad_state.
-  (void)transcriber_handle;
-  (void)stream_handle;
-  *out_state = 0;
-  *out_speaker_id_capacity = 0;
-  *out_finalized_at_ms = 0;
+  Transcriber *transcriber = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(transcriber_map_mutex);
+    auto _it = transcriber_map.find(transcriber_handle);
+    if (_it != transcriber_map.end()) {
+      transcriber = _it->second;
+    }
+  }
+  if (transcriber == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  std::lock_guard<std::mutex> _lk(stream->diarization_state_mutex);
+  *out_state = stream->last_diarization_state;
+  *out_speaker_id_capacity = stream->last_speaker_id.size();
+  *out_finalized_at_ms = stream->last_diarization_finalized_at_ms;
+  // Copy the speaker id into the caller's buffer if it's large enough;
+  // otherwise leave it untouched (caller can retry with a larger buffer).
+  if (out_speaker_id != nullptr &&
+      *out_speaker_id_capacity >= stream->last_speaker_id.size() + 1) {
+    std::memcpy(out_speaker_id, stream->last_speaker_id.data(),
+                stream->last_speaker_id.size());
+    out_speaker_id[stream->last_speaker_id.size()] = '\0';
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_session_set_vad_callback(
+    int32_t transcriber_handle, int32_t stream_handle,
+    moonshine_vad_callback_t callback, void *user_data) {
+  if (log_api_calls) {
+    LOGF("moonshine_session_set_vad_callback(transcriber=%d, stream=%d, "
+         "callback=%p, user_data=%p)",
+         transcriber_handle, stream_handle,
+         reinterpret_cast<const void *>(callback), user_data);
+  }
+  Transcriber *transcriber = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(transcriber_map_mutex);
+    auto _it = transcriber_map.find(transcriber_handle);
+    if (_it != transcriber_map.end()) {
+      transcriber = _it->second;
+    }
+  }
+  if (transcriber == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  std::lock_guard<std::mutex> _lk(stream->vad_callback_mutex);
+  stream->vad_callback = reinterpret_cast<TranscriberStream::VadCallback>(callback);
+  stream->vad_callback_user_data = user_data;
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_session_set_diarization_callback(
+    int32_t transcriber_handle, int32_t stream_handle,
+    moonshine_diarization_callback_t callback, void *user_data) {
+  if (log_api_calls) {
+    LOGF("moonshine_session_set_diarization_callback(transcriber=%d, stream=%d, "
+         "callback=%p, user_data=%p)",
+         transcriber_handle, stream_handle,
+         reinterpret_cast<const void *>(callback), user_data);
+  }
+  Transcriber *transcriber = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(transcriber_map_mutex);
+    auto _it = transcriber_map.find(transcriber_handle);
+    if (_it != transcriber_map.end()) {
+      transcriber = _it->second;
+    }
+  }
+  if (transcriber == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  std::lock_guard<std::mutex> _lk(stream->diarization_callback_mutex);
+  stream->diarization_callback =
+      reinterpret_cast<TranscriberStream::DiarizationCallback>(callback);
+  stream->diarization_callback_user_data = user_data;
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_session_clear_vad_callback(int32_t transcriber_handle,
+                                                       int32_t stream_handle) {
+  if (log_api_calls) {
+    LOGF("moonshine_session_clear_vad_callback(transcriber=%d, stream=%d)",
+         transcriber_handle, stream_handle);
+  }
+  Transcriber *transcriber = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(transcriber_map_mutex);
+    auto _it = transcriber_map.find(transcriber_handle);
+    if (_it != transcriber_map.end()) {
+      transcriber = _it->second;
+    }
+  }
+  if (transcriber == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  std::lock_guard<std::mutex> _lk(stream->vad_callback_mutex);
+  stream->vad_callback = nullptr;
+  stream->vad_callback_user_data = nullptr;
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_session_clear_diarization_callback(
+    int32_t transcriber_handle, int32_t stream_handle) {
+  if (log_api_calls) {
+    LOGF("moonshine_session_clear_diarization_callback(transcriber=%d, "
+         "stream=%d)",
+         transcriber_handle, stream_handle);
+  }
+  Transcriber *transcriber = nullptr;
+  {
+    std::lock_guard<std::mutex> _lk(transcriber_map_mutex);
+    auto _it = transcriber_map.find(transcriber_handle);
+    if (_it != transcriber_map.end()) {
+      transcriber = _it->second;
+    }
+  }
+  if (transcriber == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  std::lock_guard<std::mutex> _lk(stream->diarization_callback_mutex);
+  stream->diarization_callback = nullptr;
+  stream->diarization_callback_user_data = nullptr;
+  return MOONSHINE_ERROR_NONE;
+}
+
+// ─── Intent recognizer C-ABI (Phase C) ────────────────────────────────────
+//
+// The intent pipeline lives upstream of this C-ABI surface; the cumulative
+// pin at v0.1.1 does not include a public IntentRecognizer class. The
+// entry points below exist so the Rust FFI can link without the vendored
+// Rust stubs (rust/server/src/intent_stubs.c). They all return
+// MOONSHINE_ERROR_UNKNOWN for now; Phase D drops the Rust stubs once
+// these symbols exist natively.
+//
+// All free functions accept NULL gracefully so callers that pass nullptr
+// (rather than the handle returned by moonshine_create_intent_recognizer,
+// which is also -1 today) don't crash.
+
+extern "C" int32_t moonshine_create_intent_recognizer(const char *model_path,
+                                                      uint32_t model_arch,
+                                                      const char *model_variant) {
+  if (log_api_calls) {
+    LOGF("moonshine_create_intent_recognizer(model_path=%s, model_arch=%u, "
+         "model_variant=%s)",
+         model_path == nullptr ? "<null>" : model_path,
+         static_cast<unsigned>(model_arch),
+         model_variant == nullptr ? "<null>" : model_variant);
+  }
   return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" int32_t moonshine_free_intent_recognizer(int32_t handle) {
+  (void)handle;
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_register_intent(int32_t handle,
+                                            const char *canonical_phrase,
+                                            float *embedding,
+                                            uint64_t embedding_size) {
+  (void)handle;
+  (void)canonical_phrase;
+  (void)embedding;
+  (void)embedding_size;
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" int32_t moonshine_unregister_intent(int32_t handle,
+                                              const char *canonical_phrase) {
+  (void)handle;
+  (void)canonical_phrase;
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" int32_t moonshine_get_closest_intents(
+    int32_t handle, const float *embedding, uint64_t embedding_size,
+    uint64_t k, moonshine_intent_match_t *matches, uint64_t matches_capacity,
+    uint64_t *out_count) {
+  (void)handle;
+  (void)embedding;
+  (void)embedding_size;
+  (void)k;
+  (void)matches;
+  (void)matches_capacity;
+  if (out_count != nullptr) {
+    *out_count = 0;
+  }
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" void moonshine_free_intent_matches(moonshine_intent_match_t *matches,
+                                              uint64_t count) {
+  (void)matches;
+  (void)count;
+}
+
+extern "C" int32_t moonshine_calculate_intent_embedding(
+    int32_t handle, const char *text, float *out_embedding,
+    uint64_t *out_embedding_size) {
+  (void)handle;
+  (void)text;
+  if (out_embedding_size != nullptr) {
+    *out_embedding_size = 0;
+  }
+  (void)out_embedding;
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" void moonshine_free_intent_embedding(float *embedding) {
+  (void)embedding;
+}
+
+extern "C" int32_t moonshine_clear_intents(int32_t handle) {
+  (void)handle;
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" int32_t moonshine_get_intent_count(int32_t handle) {
+  (void)handle;
+  return 0;
 }

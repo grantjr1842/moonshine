@@ -604,6 +604,15 @@ void Transcriber::free_stream(int32_t stream_id) {
   delete stream;
 }
 
+TranscriberStream *Transcriber::get_stream(int32_t stream_id) {
+  std::lock_guard<std::mutex> lock(this->streams_mutex);
+  auto _it = this->streams.find(stream_id);
+  if (_it == this->streams.end()) {
+    return nullptr;
+  }
+  return _it->second;
+}
+
 void Transcriber::start_stream(int32_t stream_id) {
   std::lock_guard<std::mutex> lock(this->streams_mutex);
   TranscriberStream *stream = this->streams[stream_id];

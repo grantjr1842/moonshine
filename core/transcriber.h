@@ -106,6 +106,39 @@ class TranscriberStream {
   // identification is disabled.
   int32_t diarizer_stream_id = -1;
 
+  // ─── Phase B — per-session state cache + Spec D Shape 2 callbacks ───
+  //
+  // moonshine_session_get_vad_state / _get_diarization_state read from
+  // these fields (written by transcribe_stream on every chunk). The
+  // moonshine_session_set_*_callback / _clear_*_callback C-ABI entry
+  // points install / remove C function pointers that the transcription
+  // path fires on every state transition.
+  //
+  // VAD state: 0 = silence, 1 = speech (matches the C-ABI contract).
+  int32_t last_vad_state = 0;
+  int64_t last_vad_timestamp_ms = 0;
+
+  // Diarization state: 0 = none, 1 = enrolled, 2 = known.
+  std::mutex diarization_state_mutex;
+  int32_t last_diarization_state = 0;
+  std::string last_speaker_id;
+  int64_t last_diarization_finalized_at_ms = 0;
+
+  // Spec D Shape 2 callback typedefs (C-ABI-compatible signatures).
+  using VadCallback =
+      void (*)(void *user_data, int32_t state, int64_t frame_timestamp_ms);
+  using DiarizationCallback =
+      void (*)(void *user_data, int32_t state, const char *speaker_id,
+               int64_t finalized_at_ms);
+
+  std::mutex vad_callback_mutex;
+  VadCallback vad_callback = nullptr;
+  void *vad_callback_user_data = nullptr;
+
+  std::mutex diarization_callback_mutex;
+  DiarizationCallback diarization_callback = nullptr;
+  void *diarization_callback_user_data = nullptr;
+
   TranscriberStream(VoiceActivityDetector *vad, int32_t stream_id,
                     const std::string &save_input_wav_path = "");
   ~TranscriberStream() {
@@ -260,6 +293,13 @@ class Transcriber {
                            uint64_t audio_length, int32_t sample_rate);
   void transcribe_stream(int32_t stream_id, uint32_t flags,
                          struct transcript_t **out_transcript);
+
+  /// Look up the ``TranscriberStream *`` for ``stream_id``. Returns
+  /// ``nullptr`` if no such stream exists. Phase B: the
+  /// ``moonshine_session_get_vad_state`` / ``_get_diarization_state`` /
+  /// ``_set_*_callback`` / ``_clear_*_callback`` C-ABI entry points all
+  /// resolve the stream handle through this accessor.
+  TranscriberStream *get_stream(int32_t stream_id);
   // Reliability-test helper: bytes of PCM retained inside stream VAD segments.
   size_t stream_vad_retained_audio_bytes(int32_t stream_id);
   size_t stream_vad_completed_audio_bytes(int32_t stream_id);

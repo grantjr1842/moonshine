@@ -1236,6 +1236,117 @@ MOONSHINE_EXPORT int32_t moonshine_session_get_diarization_state(
     char *out_speaker_id, uint64_t *out_speaker_id_capacity,
     int64_t *out_finalized_at_ms);
 
+/* Spec D Shape 2 callback typedefs (one per side). The callbacks fire on
+   every state transition; the caller can clear them via the matching
+   ``_clear_*_callback`` entry point. ``user_data`` is the pointer the
+   caller passed at install time; ``speaker_id`` / ``finalized_at_ms`` are
+   only meaningful when ``state`` is "known" (2). */
+typedef void (*moonshine_vad_callback_t)(void *user_data, int32_t state,
+                                         int64_t frame_timestamp_ms);
+typedef void (*moonshine_diarization_callback_t)(void *user_data,
+                                                 int32_t state,
+                                                 const char *speaker_id,
+                                                 int64_t finalized_at_ms);
+
+/* Install a per-session VAD callback. Replaces any previous callback.
+   Returns ``MOONSHINE_ERROR_NONE`` on success. */
+MOONSHINE_EXPORT int32_t moonshine_session_set_vad_callback(
+    int32_t transcriber_handle, int32_t stream_handle,
+    moonshine_vad_callback_t callback, void *user_data);
+
+/* Install a per-session diarization callback. Replaces any previous
+   callback. Returns ``MOONSHINE_ERROR_NONE`` on success. */
+MOONSHINE_EXPORT int32_t moonshine_session_set_diarization_callback(
+    int32_t transcriber_handle, int32_t stream_handle,
+    moonshine_diarization_callback_t callback, void *user_data);
+
+/* Remove the per-session VAD callback (no-op if none installed).
+   Returns ``MOONSHINE_ERROR_NONE`` on success. */
+MOONSHINE_EXPORT int32_t moonshine_session_clear_vad_callback(
+    int32_t transcriber_handle, int32_t stream_handle);
+
+/* Remove the per-session diarization callback (no-op if none installed).
+   Returns ``MOONSHINE_ERROR_NONE`` on success. */
+MOONSHINE_EXPORT int32_t moonshine_session_clear_diarization_callback(
+    int32_t transcriber_handle, int32_t stream_handle);
+
+/* ─── Intent recognizer C-ABI ────────────────────────────────────────
+ *
+ * The intent pipeline lives upstream of this C-ABI surface; the
+ * cumulative pin at v0.1.1 does not include a public IntentRecognizer
+ * class. The entry points below exist so the Rust FFI can link without
+ * the vendored Rust stubs (rust/server/src/intent_stubs.c). They all
+ * return ``MOONSHINE_ERROR_UNKNOWN`` for now and will be wired up to
+ * the upstream pipeline once it's exported.
+ *
+ * Shape of ``moonshine_intent_match_t`` (matches the Rust stub):
+ *   typedef struct moonshine_intent_match_t {
+ *     const char *canonical_phrase;
+ *     float *embedding;
+ *     uint64_t embedding_size;
+ *     float similarity;
+ *   } moonshine_intent_match_t;
+ */
+typedef struct moonshine_intent_match_t {
+  const char *canonical_phrase;
+  float *embedding;
+  uint64_t embedding_size;
+  float similarity;
+} moonshine_intent_match_t;
+
+/* Create an intent recognizer handle. ``model_path`` / ``model_arch`` /
+ * ``model_variant`` follow the convention of
+ * ``moonshine_load_transcriber_from_files``. Returns
+ * ``MOONSHINE_ERROR_UNKNOWN`` (the upstream pipeline is not yet
+ * exported as a C-ABI in this pin). */
+MOONSHINE_EXPORT int32_t moonshine_create_intent_recognizer(
+    const char *model_path, uint32_t model_arch, const char *model_variant);
+
+/* Release the intent recognizer. ``MOONSHINE_ERROR_NONE`` on success. */
+MOONSHINE_EXPORT int32_t moonshine_free_intent_recognizer(int32_t handle);
+
+/* Register a canonical intent with its pre-computed embedding.
+ * Returns ``MOONSHINE_ERROR_UNKNOWN``. */
+MOONSHINE_EXPORT int32_t moonshine_register_intent(int32_t handle,
+                                                  const char *canonical_phrase,
+                                                  float *embedding,
+                                                  uint64_t embedding_size);
+
+/* Unregister a previously-registered intent. Returns
+ * ``MOONSHINE_ERROR_UNKNOWN``. */
+MOONSHINE_EXPORT int32_t moonshine_unregister_intent(int32_t handle,
+                                                    const char *canonical_phrase);
+
+/* Find the ``k`` nearest intents to ``embedding``. ``matches`` (capacity
+ * ``matches_capacity``) is filled with the top-k matches; ``*out_count``
+ * receives the actual number returned. Returns
+ * ``MOONSHINE_ERROR_UNKNOWN``. */
+MOONSHINE_EXPORT int32_t moonshine_get_closest_intents(
+    int32_t handle, const float *embedding, uint64_t embedding_size,
+    uint64_t k, moonshine_intent_match_t *matches, uint64_t matches_capacity,
+    uint64_t *out_count);
+
+/* Release matches returned by ``moonshine_get_closest_intents``. */
+MOONSHINE_EXPORT void moonshine_free_intent_matches(
+    moonshine_intent_match_t *matches, uint64_t count);
+
+/* Embed ``text`` for intent matching. ``*out_embedding`` (capacity
+ * ``*out_embedding_size``) is filled with the embedding; ``*out_size`` is
+ * updated to the required length. Returns ``MOONSHINE_ERROR_UNKNOWN``. */
+MOONSHINE_EXPORT int32_t moonshine_calculate_intent_embedding(
+    int32_t handle, const char *text, float *out_embedding,
+    uint64_t *out_embedding_size);
+
+/* Release an embedding returned by
+ * ``moonshine_calculate_intent_embedding``. */
+MOONSHINE_EXPORT void moonshine_free_intent_embedding(float *embedding);
+
+/* Drop all registered intents from the recognizer. */
+MOONSHINE_EXPORT int32_t moonshine_clear_intents(int32_t handle);
+
+/* Number of registered intents on the recognizer. */
+MOONSHINE_EXPORT int32_t moonshine_get_intent_count(int32_t handle);
+
 #ifdef __cplusplus
 }
 #endif
