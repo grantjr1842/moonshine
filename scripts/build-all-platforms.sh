@@ -38,9 +38,11 @@
 # See scripts/start-candidate.sh for the full process.
 #
 # Resumable: each stage drops a breadcrumb under .release-state/<version>/ when
-# it completes, so re-running the script (e.g. after a failure, or after folding
-# in a fix) skips the stages that already finished and picks up where it left
-# off. Set RELEASE_FRESH=1 to discard the breadcrumbs and rebuild every stage.
+# it completes, so re-running the script after a failure skips the stages that
+# already finished and picks up where it left off. The breadcrumbs record the
+# commit they were built from and are discarded when it changes, so folding a
+# late fix into the branch rebuilds everything rather than passing off stages
+# that only ever saw the old code. Set RELEASE_FRESH=1 to discard them anyway.
 #
 # Environment:
 #   RELEASE_REF            - candidate branch (or tag/sha) to build. Defaults to
@@ -51,6 +53,11 @@
 #                            rebuild every stage.
 #   RELEASE_SKIP_PREFLIGHT - if non-empty, skip scripts/preflight-release.sh.
 #                            Only for deliberately unusual rebuilds.
+#   MOONSHINE_LATENCY_OPTIONAL - if non-empty, the iOS streaming latency
+#                            ceilings in StreamingLatencyTests are reported as
+#                            warnings rather than failures. macOS ceilings were
+#                            removed (timings are printed only). Grep the log
+#                            for MOONSHINE_LATENCY_WARNING afterwards.
 #   LINUX_CLOUD_HOST       - SSH host for Linux cloud
 #   LINUX_CLOUD_INSTANCE   - GCP instance name for the Linux VM (optional)
 #   LINUX_CLOUD_ZONE       - GCP zone for the Linux VM (e.g. us-central1-b)
@@ -284,9 +291,10 @@ cleanup() {
 
 # Per-release resume support: each stage drops a breadcrumb file in STATE_DIR
 # when it finishes, so re-running the script skips any stage that already
-# completed for the same release ref. Because the release is pinned to an
-# immutable ref, a resumed run rebuilds identical code. Set RELEASE_FRESH=1 to
-# clear the breadcrumbs and rebuild every stage from scratch.
+# completed for the same release ref. The breadcrumb set is discarded whenever
+# the build commit changes, so a resumed run only ever skips work that was done
+# against the code being built now. Set RELEASE_FRESH=1 to clear the
+# breadcrumbs and rebuild every stage from scratch.
 run_stage() {
     local name="$1"
     shift
@@ -344,15 +352,59 @@ stage_linux() {
       && scripts/test-android.sh --avd '${ANDROID_X86_64_AVD:-moonshine_api26_x86_64}'" || exit 1
 }
 
-# The Raspberry Pi cloud host checks out the release ref and publishes the arm64
-# wheel. The arm64 C++ library archive (moonshine-voice-linux-arm64.tar.gz) is
-# NOT built here anymore -- it moved to the native-arm64 Docker instance in the
-# build-pip-docker stage, which is much faster than the Pi.
+# Where build-pip-docker's arm64 container leaves the wheel, and where we keep a
+# copy of it (see cache_arm64_wheel) so a resumed run can still find one.
+ARM64_WHEEL_GLOB="language-bindings/python/dist/moonshine_voice-*_aarch64.whl"
+
+arm64_wheel() {
+    local wheel
+    wheel="$(ls ${RELEASE_DIR}/${ARM64_WHEEL_GLOB} 2>/dev/null | head -n 1)"
+    if [ -z "${wheel}" ]; then
+        wheel="$(ls "${STATE_DIR}"/moonshine_voice-*_aarch64.whl 2>/dev/null \
+            | head -n 1)"
+    fi
+    echo "${wheel}"
+}
+
+# Keep the arm64 wheel outside the disposable worktree, the way the xcframework
+# is kept, because the Pi stage installs it rather than building its own.
+cache_arm64_wheel() {
+    local wheel
+    wheel="$(ls ${RELEASE_DIR}/${ARM64_WHEEL_GLOB} 2>/dev/null | head -n 1)"
+    if [ -n "${wheel}" ]; then
+        rm -f "${STATE_DIR}"/moonshine_voice-*_aarch64.whl
+        cp "${wheel}" "${STATE_DIR}/"
+    fi
+}
+
+# The Raspberry Pi installs the arm64 wheel that build-pip-docker already built
+# and uploaded, and runs the Python tests against it. It used to compile core and
+# build a wheel of its own, which took hours and produced a duplicate of the
+# container's: same architecture and the same vendored ONNX Runtime, but tagged
+# manylinux_2_39 against the container's 2_34, so it claimed to need a newer
+# glibc than the identical binaries actually did. What no container can tell us
+# is whether the wheel we ship really runs on a Pi, so that is what we check.
+#
+# The arm64 C++ library archive (moonshine-voice-linux-arm64.tar.gz) is likewise
+# built by the native-arm64 Docker instance, not here.
 stage_pi() {
+    local wheel
+    wheel="$(arm64_wheel)"
+    if [ -z "${wheel}" ]; then
+        echo "No arm64 wheel to install on the Pi; run build-pip-docker." >&2
+        exit 1
+    fi
+    echo "Testing $(basename "${wheel}") on the Pi."
+    # dist/ is untracked, so the checkout leaves any older wheel in place and
+    # test-python.sh would install whichever sorted first.
     ssh -p ${RPI_CLOUD_PORT} ${RPI_CLOUD_HOST} "cd moonshine \
       && ${REMOTE_GIT_SYNC} \
-      && scripts/test-core.sh \
-      && scripts/build-pip.sh ${UPLOAD_ARGS[*]}" || exit 1
+      && rm -rf language-bindings/python/dist \
+      && mkdir -p language-bindings/python/dist" || exit 1
+    scp -P ${RPI_CLOUD_PORT} "${wheel}" \
+        "${RPI_CLOUD_HOST}:moonshine/language-bindings/python/dist/" || exit 1
+    ssh -p ${RPI_CLOUD_PORT} ${RPI_CLOUD_HOST} "cd moonshine \
+      && scripts/test-python.sh --skip-build" || exit 1
 }
 
 # The Windows cloud host runs the CI orchestrator over SSH with
@@ -434,11 +486,20 @@ PY
     # than masking it behind the exit code of the last chained command. The
     # sync command is expanded locally (via the single-quote break) so PowerShell
     # variables like $LASTEXITCODE stay intact for the remote shell.
-    local windows_remote_cmd="${windows_env_bootstrap}"'try { cd moonshine `
+    #
+    # The orchestrator's exit code is captured and re-raised explicitly rather
+    # than left to fall out of whatever ran last. The finally block deletes a
+    # credentials file that only an upload run creates, so on a dry run it
+    # removes a path that is not there and the session exits non-zero on the
+    # strength of that alone -- failing the stage immediately after the CI run
+    # reported success.
+    local windows_remote_cmd="${windows_env_bootstrap}"'$rc = 1; try { cd moonshine `
       ; '"${WIN_GIT_SYNC}"' `
       ; if ($LASTEXITCODE -ne 0) { Write-Host "git sync failed"; exit 1 } `
       ; pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\run-windows-ci.ps1'"${WINDOWS_UPLOAD_FLAG}"' `
-      } finally { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:USERPROFILE ".moonshine-release-env.ps1") }'
+      ; $rc = $LASTEXITCODE `
+      } finally { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:USERPROFILE ".moonshine-release-env.ps1") } `
+      ; exit $rc'
 
     # Transient SSH/network disconnects (not build defects) have killed runs
     # mid-compile. The remote build is a clean rebuild and therefore idempotent,
@@ -620,7 +681,13 @@ main() {
     # Skipped for explicit tag/sha rebuilds, which are deliberately reproducing
     # an old state rather than shipping a new one.
     if [ -n "${RELEASE_BRANCH}" ] && [ -z "${RELEASE_SKIP_PREFLIGHT:-}" ]; then
-        "${SCRIPTS_DIR}/preflight-release.sh" "${RELEASE_BRANCH}" "${BUILD_COMMIT}"
+        PREFLIGHT_ARGS=()
+        if [ -z "${PUBLISH}" ]; then
+            PREFLIGHT_ARGS=(--dry-run)
+        fi
+        "${SCRIPTS_DIR}/preflight-release.sh" \
+            ${PREFLIGHT_ARGS[@]+"${PREFLIGHT_ARGS[@]}"} \
+            "${RELEASE_BRANCH}" "${BUILD_COMMIT}"
     fi
 
     # Refresh the v<version> tag to the branch HEAD and push it, so the publish
@@ -671,6 +738,20 @@ main() {
         rm -rf "${STATE_DIR}"
     fi
     mkdir -p "${STATE_DIR}"
+    # Breadcrumbs are keyed by version, but a candidate branch's HEAD moves as
+    # late fixes land, and the two together are what let a resumed run skip a
+    # stage that only ever built the older code -- reporting a pass for
+    # something that was never tested. A changed build commit invalidates the
+    # whole set.
+    COMMIT_STAMP="${STATE_DIR}/build-commit"
+    if [ -f "${COMMIT_STAMP}" ] \
+        && [ "$(cat "${COMMIT_STAMP}")" != "${BUILD_COMMIT}" ]; then
+        echo "Breadcrumbs are from $(cat "${COMMIT_STAMP}") but this run builds" \
+             "${BUILD_COMMIT}; clearing them so every stage rebuilds current code."
+        rm -rf "${STATE_DIR}"
+        mkdir -p "${STATE_DIR}"
+    fi
+    echo "${BUILD_COMMIT}" > "${COMMIT_STAMP}"
     echo "Resume breadcrumbs: ${STATE_DIR}"
     if compgen -G "${STATE_DIR}/*.done" >/dev/null; then
         echo "Already-completed stages that will be skipped:"
@@ -745,6 +826,26 @@ main() {
         fi
     fi
 
+    # The wasm bundle goes the same way with the worktree, and publish-examples
+    # only checks the demos against it when it happens to be there -- so a
+    # resumed run would drop that coverage without saying anything rather than
+    # fail. There is nothing worth caching, so rebuild it.
+    if [[ -f "${STATE_DIR}/build-wasm.done" \
+        && ! -f "${RELEASE_DIR}/language-bindings/wasm/dist/index.js" ]]; then
+        echo "build-wasm.done but the fresh worktree has no wasm bundle;" \
+             "clearing the breadcrumb so it rebuilds."
+        rm -f "${STATE_DIR}/build-wasm.done"
+    fi
+
+    # The Pi has nothing to install if no run has produced an arm64 wheel since
+    # the worktree it was built in went away, and skipping the stage would mean
+    # never checking the wheel on real hardware.
+    if [[ -f "${STATE_DIR}/build-pip-docker.done" && -z "$(arm64_wheel)" ]]; then
+        echo "build-pip-docker.done but no arm64 wheel in the worktree or cache;" \
+             "clearing the breadcrumb so it rebuilds."
+        rm -f "${STATE_DIR}/build-pip-docker.done"
+    fi
+
     cd "${RELEASE_DIR}"
     run_stage test-core          scripts/test-core.sh
     run_stage test-python        scripts/test-python.sh
@@ -768,15 +869,13 @@ main() {
     run_stage build-android      scripts/build-android.sh "${ANDROID_ARGS[@]}"
     run_stage build-pip          scripts/build-pip.sh "${UPLOAD_ARGS[@]}"
     run_stage build-pip-docker   scripts/build-pip-docker.sh "${UPLOAD_ARGS[@]}"
+    cache_arm64_wheel
     run_stage publish-binary     scripts/publish-binary.sh "${UPLOAD_ARGS[@]}"
-    # upload attaches moonshine-voice-wasm.tar.gz to the GitHub release;
-    # publish-npm pushes @moonshine-ai/moonshine-wasm so the web demos' default
-    # jsDelivr import resolves (without it, /stt/ etc. 404 on the CDN).
-    if [ -n "${PUBLISH}" ]; then
-        run_stage build-wasm     scripts/build-wasm.sh publish-npm "${UPLOAD_ARGS[@]}"
-    else
-        run_stage build-wasm     scripts/build-wasm.sh "${UPLOAD_ARGS[@]}"
-    fi
+    # upload attaches moonshine-voice-wasm.tar.gz to the GitHub release.
+    # npm publish is intentionally separate (scripts/publish-wasm-npm.sh): npm
+    # auth is interactive / token-expiry prone and must not stall this run.
+    # Without the npm push, jsDelivr still 404s until you run that script.
+    run_stage build-wasm     scripts/build-wasm.sh "${UPLOAD_ARGS[@]}"
     run_stage publish-examples   scripts/publish-examples.sh "${UPLOAD_ARGS[@]}"
 
     run_stage linux   stage_linux
@@ -799,6 +898,7 @@ main() {
             scripts/finish-release.sh "${RELEASE_BRANCH}" "${BUILD_COMMIT}"
         echo "All stages complete for ${RELEASE_REF} (tag v${VERSION} at ${BUILD_COMMIT})."
         echo "main now points at the released commit."
+        echo "Publish the wasm package when ready: scripts/publish-wasm-npm.sh"
         echo "Start the next cycle with scripts/start-candidate.sh <next_version>."
     else
         echo "All stages complete for ${RELEASE_REF} (${BUILD_COMMIT})."

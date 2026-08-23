@@ -290,6 +290,35 @@ public final class MicTranscriber: @unchecked Sendable {
         isMuted = muted
     }
 
+    /// Biases the decoder towards a list of terms while listening, replacing any
+    /// previous list. See ``Transcriber/setKeyterms(_:)``; this can be called
+    /// between phrases to follow whatever the user is looking at. To start with a
+    /// list instead, pass the ``keyterms`` transcriber option to ``options(_:)``.
+    /// - Throws: ``MoonshineError`` if no model is loaded yet, if a term contains
+    ///   a comma, or if the model is not a streaming architecture.
+    public func setKeyterms(_ keyterms: [String]) throws {
+        guard let transcriber else {
+            throw MoonshineError.custom(
+                message: "No model loaded. Call load() before setKeyterms().", code: -1)
+        }
+        try transcriber.setKeyterms(keyterms)
+    }
+
+    /// Picks the key terms out of a passage of text and biases towards them while
+    /// listening. See ``Transcriber/setContext(_:maxTerms:)``; this can be called
+    /// between phrases to follow the document or thread the user is in. To start
+    /// with a passage instead, pass the ``context`` transcriber option to
+    /// ``options(_:)``.
+    /// - Throws: ``MoonshineError`` if no model is loaded yet, or if the model is
+    ///   not a streaming architecture.
+    public func setContext(_ context: String, maxTerms: Int32 = 0) throws {
+        guard let transcriber else {
+            throw MoonshineError.custom(
+                message: "No model loaded. Call load() before setContext().", code: -1)
+        }
+        try transcriber.setContext(context, maxTerms: maxTerms)
+    }
+
     /// Start listening to the microphone and begin transcription.
     /// - Throws: `MoonshineError` or `AVAudioSessionError` if starting fails
     public func start() throws {

@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "context-biaser.h"
+#include "context-extractor.h"
 #include "file-information.h"
 #include "moonshine-model.h"
 #include "moonshine-streaming-model.h"
@@ -159,6 +161,21 @@ class TranscriberStream {
 
 typedef std::map<int32_t, TranscriberStream *> TranscriberStreamMap;
 
+// Every canonical asset key the keyed in-memory loader
+// (``ModelSource::MEMORY_FILES``, reached through
+// ``moonshine_load_transcriber_from_memory_files``) knows how to resolve,
+// grouped by the code that consumes each one. The union across architectures
+// is deliberate: a caller that downloaded a manifest and handed over every
+// file it received should not be punished for including an asset this
+// particular architecture or option set has no use for.
+const std::vector<std::string> &recognized_transcriber_model_files();
+
+// Whether ``key`` names an asset the in-memory loader understands. Callers
+// supplying anything else are rejected rather than silently ignored, so a typo
+// like "tokenizer.bn" is reported against the key that was actually passed
+// instead of surfacing later as a confusing "required asset missing" failure.
+bool is_recognized_transcriber_model_file(const std::string &key);
+
 struct TranscriberOptions {
   enum ModelSource {
     FILES,
@@ -222,10 +239,32 @@ struct TranscriberOptions {
   // decode_full and continue from the first mismatch instead of greedy
   // redecode from BOS. On by default for lower end-of-phrase latency.
   bool use_speculative_decoding = true;
+  // When false, skip the decoder until VAD completes the line. Encoder
+  // (and diarization) still run on each update so the final decode has
+  // current memory; there is no live/provisional text.
+  bool decode_incomplete_lines = true;
+  // Terms to bias the decoder towards at runtime — jargon, product names,
+  // proper nouns. No retraining is involved: each term is compiled into a
+  // subword trie and used to nudge the logits during decoding (see
+  // context-biaser.h). Only the streaming architectures support this. Can also
+  // be changed mid-stream with Transcriber::set_keyterms.
+  std::vector<std::string> keyterms;
+  // Strength of the nudge. Higher recovers more key terms but risks hearing
+  // them where they were not said; scripts/eval-keyterm-biasing.py sweeps this.
+  float keyterm_boost = ContextBiaser::kDefaultBoost;
+  // A passage of free-form text to pick key terms out of, for callers that have
+  // context but not a list — the document on screen, an agenda, a thread. The
+  // terms it yields are added to any in ``keyterms`` (see context-extractor.h
+  // for how they are chosen), and Transcriber::set_context replaces them later.
+  std::string context;
+  // Most terms to take from ``context``. Zero means
+  // ContextExtractor::kDefaultMaxTerms.
+  int32_t context_max_terms = 0;
   // Minimum seconds of new audio between diarization re-clustering passes.
   float diarization_cluster_cadence = 2.0f;
   // Seconds between diarization segmentation/embedding model runs. Zero
-  // means use the model default (1 second).
+  // means use the model default (1 second). Live add_audio processes at most
+  // one window per call; remaining windows wait for the next call or Stop.
   float diarization_analyze_cadence = 0.0f;
   // Maximum seconds of audio history fed to VBx per refresh. Zero means
   // unlimited. Default 120 bounds compute on long streaming sessions.
@@ -263,6 +302,12 @@ class Transcriber {
   std::mutex spelling_model_mutex;
   SpellingMatcher spelling_matcher;
 
+  // Compiled key-term trie for contextual biasing. Empty unless the caller
+  // asked for key terms. Guarded because set_keyterms can be called from
+  // another thread while a stream is running.
+  ContextBiaser context_biaser;
+  std::mutex context_biaser_mutex;
+
   // Track current segment for incremental processing
   uint64_t current_streaming_segment_id = UINT64_MAX;
   size_t streaming_samples_processed = 0;
@@ -284,6 +329,32 @@ class Transcriber {
                                     uint64_t audio_length, int32_t sample_rate,
                                     uint32_t flags,
                                     struct transcript_t **out_transcript);
+
+  // Replaces the contextual-biasing key terms. Safe to call between
+  // transcribe calls on a live stream, so a caller can follow the user's
+  // context (the contact list on screen, the current document's vocabulary)
+  // as it changes. Passing an empty list turns biasing off. Throws if the
+  // loaded model is not a streaming architecture, which is the only one whose
+  // decode path applies the bias.
+  void set_keyterms(const std::vector<std::string> &keyterms);
+
+  // Picks key terms out of a passage of free-form text and biases towards
+  // them, replacing any previous list. For callers who have context rather
+  // than a curated list: hand over the document the user is looking at, the
+  // agenda for the meeting, the last few messages in the thread. ``max_terms``
+  // caps the list, and zero asks for ContextExtractor::kDefaultMaxTerms.
+  // Passing an empty passage turns biasing off. Throws under the same
+  // conditions as set_keyterms.
+  void set_context(const std::string &context, int32_t max_terms = 0);
+
+  // The terms set_context would choose from ``context``, most important first.
+  // Nothing is installed and no state changes, so a caller can show the user
+  // what was picked, and a test can check the choice without decoding audio.
+  // Throws if the loaded model is not a streaming architecture. Returns an
+  // empty list when no model is loaded at all, which is the skip_transcription
+  // case: there is nothing to judge words against and nothing to decode.
+  std::vector<std::string> keyterms_from_context(const std::string &context,
+                                                 int32_t max_terms);
 
   int32_t create_stream();
   void free_stream(int32_t stream_id);

@@ -6,7 +6,7 @@ enable_testing()
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(MOONSHINE_VERSION "0.1.1")
+set(MOONSHINE_VERSION "0.1.3")
 
 # Ensure the standard is strictly enforced (optional, but recommended)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +20,22 @@ elseif (EMSCRIPTEN)
   # Keep first-party warnings visible but don't fail the wasm build on them
   # (the Emscripten clang can differ from the native toolchains).
   add_compile_options(-Wall -Wextra)
+endif()
+
+# GCC 12's -Wrestrict misfires on ordinary libstdc++ std::string operations once
+# they inline at -O2, reporting overlaps that cannot exist: it flags a plain
+# `whole = "0";` in chinese-numbers.cpp as copying 9223372036854775810 bytes at
+# offset -3. The Linux wheels and archives are the only optimized GCC build we
+# ship, so this surfaced when they started being compiled with -O2 rather than
+# unoptimized, and no amount of rewriting the source removes it. Keep the
+# diagnostic visible but stop it failing the build. Clang is unaffected.
+#
+# GCC 15's -Warray-bounds gets std::vector::insert wrong the same way: inlining
+# the copy down to a memcpy, it measures the destination against the capacity
+# the vector had before insert grew it, so appending one vector to another in
+# zipvoice-tts-test.cpp reads as writing at offset 96000 of a 96000-byte buffer.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  add_compile_options(-Wno-error=restrict -Wno-error=array-bounds)
 endif()
 
 # WebAssembly: build every core target with SIMD + pthreads + C++ exceptions so
@@ -48,6 +64,24 @@ option(MOONSHINE_RELIABILITY
 # ASan, so scripts/reliability-remote.sh builds it into its own directory).
 set(MOONSHINE_SANITIZER "address,undefined" CACHE STRING
     "Sanitizer set for MOONSHINE_RELIABILITY builds (address,undefined|thread)")
+
+# CMake passes no optimization flag at all unless a build type is chosen, so
+# every script that configures without one has been producing a library that
+# runs at debug speed. Nothing in the ONNX Runtime inference path is affected
+# (it arrives prebuilt), which is exactly why it went unnoticed: only our own
+# code around it — the tokenizer, decoding loop and contextual biasing — pays.
+# Default to optimized with symbols, and leave an explicit choice alone.
+# Multi-config generators ignore this; the scripts that use them (build-swift.sh)
+# pass --config Release. Sanitizer builds are excluded so the reliability
+# pipeline keeps choosing its own flags.
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES
+    AND NOT MOONSHINE_RELIABILITY)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
+      "Build type (defaulted to an optimized build with debug symbols)" FORCE)
+  message(STATUS
+      "No CMAKE_BUILD_TYPE specified; defaulting to ${CMAKE_BUILD_TYPE}")
+endif()
+
 if (MOONSHINE_RELIABILITY)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
     add_compile_options(
@@ -74,25 +108,33 @@ endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/find-ort-library-path.cmake)
 
+# Every subproject builds into this configuration's own binary tree, never into
+# a fixed directory in the source tree. A source-tree path would be shared by
+# every configuration that reads this file -- each Android ABI, iOS, wasm, and
+# the host -- so whichever built last left archives the next one tried to link,
+# with errors like "is incompatible with aarch64linux" or "is neither Wasm
+# object file nor LLVM bitcode". These are absolute rather than relative because
+# some of the source directories below sit outside this one, which is a case
+# where CMake requires the binary directory to be named explicitly.
 add_subdirectory(
     ${CMAKE_CURRENT_LIST_DIR}/ort-utils
-    ${CMAKE_CURRENT_LIST_DIR}/ort-utils/build
+    ${CMAKE_BINARY_DIR}/ort-utils
 )
 
 add_subdirectory(
     ${CMAKE_CURRENT_LIST_DIR}/bin-tokenizer
-    ${CMAKE_CURRENT_LIST_DIR}/bin-tokenizer/build
+    ${CMAKE_BINARY_DIR}/bin-tokenizer
 )
 
 add_subdirectory(
     ${CMAKE_CURRENT_LIST_DIR}/moonshine-tts
-    ${CMAKE_CURRENT_LIST_DIR}/moonshine-tts/build
+    ${CMAKE_BINARY_DIR}/moonshine-tts
 )
 
 if (ANDROID)
     add_subdirectory(
         ${CMAKE_CURRENT_LIST_DIR}/../language-bindings/android/moonshine-jni
-        ${CMAKE_CURRENT_LIST_DIR}/../language-bindings/android/moonshine-jni/build
+        ${CMAKE_BINARY_DIR}/moonshine-jni
     )
 endif()
 
@@ -115,6 +157,8 @@ set(MOONSHINE_SRC_FILES
     spelling-fusion.cpp
     spelling-fusion-data.cpp
     spelling-model.cpp
+    context-biaser.cpp
+    context-extractor.cpp
     word-alignment.cpp
 )
 
@@ -328,6 +372,10 @@ else()
 endif()
 
 if(MOONSHINE_TTS_BUILD_ONNX)
+    # The TTS target lives in a separately generated subdirectory. Make the
+    # dependency explicit so Make/Ninja cannot start linking moonshine before
+    # the static TTS archive has been materialized during parallel builds.
+    add_dependencies(moonshine moonshine_tts_ort)
     target_link_libraries(moonshine PRIVATE moonshine_tts_ort)
     target_include_directories(moonshine PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/moonshine-tts/src
@@ -734,6 +782,52 @@ if (NOT WIN32 OR NOT MOONSHINE_BUILD_SHARED)
         )
     endif()
 
+    add_executable(context-biaser-test context-biaser-test.cpp context-biaser.cpp)
+    set_target_properties(context-biaser-test PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_include_directories(context-biaser-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+    )
+    if (IOS OR MOONSHINE_BUILD_SWIFT)
+        set_target_properties(context-biaser-test PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_GUI_IDENTIFIER "ai.moonshine.voice.context-biaser-test"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        )
+    endif()
+    target_link_libraries(context-biaser-test PRIVATE
+        moonshine-utils
+    )
+
+    add_executable(context-extractor-test context-extractor-test.cpp context-extractor.cpp)
+    set_target_properties(context-extractor-test PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_include_directories(context-extractor-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+    )
+    if (IOS OR MOONSHINE_BUILD_SWIFT)
+        set_target_properties(context-extractor-test PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_GUI_IDENTIFIER "ai.moonshine.voice.context-extractor-test"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        )
+    endif()
+    target_link_libraries(context-extractor-test PRIVATE
+        moonshine-utils
+    )
+
     add_executable(transcriber-test transcriber-test.cpp transcriber.cpp voice-activity-detector.cpp resampler.cpp)
     set_target_properties(transcriber-test PROPERTIES
         CXX_STANDARD 20
@@ -1115,7 +1209,7 @@ endif()
 if (MOONSHINE_RELIABILITY AND MOONSHINE_SANITIZER MATCHES "address")
     add_subdirectory(
         ${CMAKE_CURRENT_LIST_DIR}/reliability
-        ${CMAKE_CURRENT_LIST_DIR}/reliability/build
+        ${CMAKE_BINARY_DIR}/reliability
     )
 endif()
 

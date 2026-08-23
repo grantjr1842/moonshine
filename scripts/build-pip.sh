@@ -6,12 +6,10 @@ PYTHON_DIR=${REPO_ROOT_DIR}/language-bindings/python
 
 CORE_DIR=${REPO_ROOT_DIR}/core
 CORE_BUILD_DIR=${CORE_DIR}/build
-# Clean every fixed build dir under core/, not just core/build. moonshine-tts and
-# other add_subdirectory targets build into shared, fixed directories (e.g.
-# core/moonshine-tts/build; see core/CMakeLists.txt) that persist across builds.
-# If a previous wasm or iOS build left non-host objects there, this host build
-# would fail to link. Mirrors scripts/build-swift.sh.
-find ${CORE_DIR} -type d -name build -prune -exec rm -rf {} +
+# Every subproject builds into this tree (see core/CMakeLists.txt), so clearing
+# it is enough to keep objects from a previous wasm, iOS or Android build out of
+# this host link.
+rm -rf ${CORE_BUILD_DIR}
 mkdir -p ${CORE_BUILD_DIR}
 # Align with bundled ONNX Runtime / dylibs so wheel metadata matches binary minimum macOS (silences
 # delocate/wheel warnings about MACOSX_DEPLOYMENT_TARGET vs interpreter).
@@ -27,7 +25,10 @@ fi
 # directory cannot be established"). See scripts/publish-binary.sh for the same
 # guard.
 cd ${CORE_DIR}
-cmake -S ${CORE_DIR} -B ${CORE_BUILD_DIR}
+# --config only reaches multi-config generators like Xcode, so the build type has
+# to be set at configure time as well or the Makefiles/Ninja build this normally
+# uses gets no optimization flag at all and the wheel ships debug-speed code.
+cmake -S ${CORE_DIR} -B ${CORE_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release
 cmake --build ${CORE_BUILD_DIR} --config Release
 
 # Drop stale native libs from other platforms (e.g. macOS dylibs left in the
@@ -50,7 +51,10 @@ elif grep -q "Raspberry Pi" /proc/cpuinfo 2>/dev/null || grep -q "BCM2" /proc/cp
 	ORT_LINUX_LIB_DIR=${CORE_DIR}/third-party/onnxruntime/lib/linux/aarch64
 	cp ${ORT_LINUX_LIB_DIR}/libonnxruntime*.so* ${PYTHON_DIR}/src/moonshine_voice/
 elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    LINUX_VERSION=2_34
+	# The glibc floor to tag the wheel with. It has to match the machine we are
+	# building on, so build-pip-docker.sh sets it when it runs this in a
+	# container older than the bookworm one this default describes.
+	LINUX_VERSION=${MOONSHINE_MANYLINUX_VERSION:-2_34}
 	# Pick the ONNX Runtime build matching the machine we're running on. The Pi
 	# branch above handles Raspberry Pi hardware specifically; this branch covers
 	# generic Linux, including native arm64 (e.g. an aarch64 Docker container on

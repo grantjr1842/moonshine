@@ -111,6 +111,21 @@ OptionVector parse_common_options(const OptionVector &options) {
   return uncommon_options;
 }
 
+// Splits the comma-separated ``keyterms`` option value into individual terms,
+// dropping surrounding whitespace and empty entries. A single delimited string
+// keeps this usable from every binding, since they all pass option values as
+// strings (the same reason ``ort_providers`` works this way).
+std::vector<std::string> parse_keyterms(const std::string &value) {
+  std::vector<std::string> keyterms;
+  for (const std::string &piece : split(value, ",")) {
+    const std::string keyterm = trim(piece);
+    if (!keyterm.empty()) {
+      keyterms.push_back(keyterm);
+    }
+  }
+  return keyterms;
+}
+
 void parse_transcriber_options(const OptionVector &options,
                                TranscriberOptions &out_options) {
   for (const auto &option : options) {
@@ -141,6 +156,16 @@ void parse_transcriber_options(const OptionVector &options,
       out_options.max_tokens_per_second = float_from_string(option_value);
     } else if (option_name == "use_speculative_decoding") {
       out_options.use_speculative_decoding = bool_from_string(option_value);
+    } else if (option_name == "decode_incomplete_lines") {
+      out_options.decode_incomplete_lines = bool_from_string(option_value);
+    } else if (option_name == "keyterms") {
+      out_options.keyterms = parse_keyterms(option_value);
+    } else if (option_name == "keyterm_boost") {
+      out_options.keyterm_boost = float_from_string(option_value);
+    } else if (option_name == "context") {
+      out_options.context = option_value;
+    } else if (option_name == "context_max_terms") {
+      out_options.context_max_terms = int32_from_string(option_value);
     } else if (option_name == "identify_speakers") {
       out_options.identify_speakers = bool_from_string(option_value);
     } else if (option_name == "diarization_cluster_cadence") {
@@ -354,6 +379,21 @@ int32_t moonshine_load_transcriber_from_memory_files(
         return MOONSHINE_ERROR_INVALID_ARGUMENT;
       }
       const std::string key(filenames[i]);
+      if (!is_recognized_transcriber_model_file(key)) {
+        std::string recognized;
+        for (const std::string &name : recognized_transcriber_model_files()) {
+          if (!recognized.empty()) {
+            recognized += ", ";
+          }
+          recognized += name;
+        }
+        LOGF(
+            "moonshine_load_transcriber_from_memory_files(): '%s' is not a "
+            "model asset this loader recognizes. Check it against the "
+            "canonical filenames: %s",
+            key.c_str(), recognized.c_str());
+        return MOONSHINE_ERROR_INVALID_ARGUMENT;
+      }
       if (memory[i] != nullptr && memory_sizes[i] > 0) {
         transcriber_options.model_files.set_memory(
             key, memory[i], static_cast<size_t>(memory_sizes[i]));
@@ -485,6 +525,50 @@ int32_t moonshine_stream_acknowledge_revision(int32_t transcriber_handle,
   } catch (const std::exception &e) {
     LOGF("Failed to acknowledge stream revision: %s\n", e.what());
     return MOONSHINE_ERROR_NOT_IMPLEMENTED;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+int32_t moonshine_transcriber_set_keyterms(int32_t transcriber_handle,
+                                           const char *keyterms) {
+  if (log_api_calls) {
+    LOGF(
+        "moonshine_transcriber_set_keyterms(transcriber_handle=%d, "
+        "keyterms='%s')",
+        transcriber_handle, keyterms == nullptr ? "" : keyterms);
+  }
+  CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
+  try {
+    const std::vector<std::string> parsed =
+        keyterms == nullptr ? std::vector<std::string>()
+                            : parse_keyterms(std::string(keyterms));
+    transcriber_map[transcriber_handle]->set_keyterms(parsed);
+  } catch (const std::exception &e) {
+    LOGF("Failed to set key terms: %s\n", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+int32_t moonshine_transcriber_set_context(int32_t transcriber_handle,
+                                          const char *context,
+                                          int32_t max_terms) {
+  if (log_api_calls) {
+    // Context passages run to whole documents, so log the size rather than the
+    // text, which would otherwise bury every other line in the log.
+    LOGF(
+        "moonshine_transcriber_set_context(transcriber_handle=%d, "
+        "context=%zu bytes, max_terms=%d)",
+        transcriber_handle,
+        context == nullptr ? size_t{0} : std::strlen(context), max_terms);
+  }
+  CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
+  try {
+    transcriber_map[transcriber_handle]->set_context(
+        context == nullptr ? std::string() : std::string(context), max_terms);
+  } catch (const std::exception &e) {
+    LOGF("Failed to set context: %s\n", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -1414,9 +1498,7 @@ int32_t moonshine_create_tts_synthesizer_from_memory(
   }
 }
 
-/* Releases the resources used by a text to speech synthesizer.
- Returns zero on success, or a non-zero error code on failure.
-*/
+/* Releases the resources used by a text to speech synthesizer. */
 void moonshine_free_tts_synthesizer(int32_t tts_synthesizer_handle) {
   if (log_api_calls) {
     LOGF("moonshine_free_tts_synthesizer(handle=%d)", tts_synthesizer_handle);
@@ -2622,9 +2704,7 @@ int32_t moonshine_create_grapheme_to_phonemizer_from_memory(
   }
 }
 
-/* Releases the resources used by a grapheme to phonemizer.
- Returns zero on success, or a non-zero error code on failure.
-*/
+/* Releases the resources used by a grapheme to phonemizer. */
 void moonshine_free_grapheme_to_phonemizer(
     int32_t grapheme_to_phonemizer_handle) {
   if (log_api_calls) {

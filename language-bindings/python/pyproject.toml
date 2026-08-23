@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moonshine-voice"
-version = "0.1.1"
+version = "0.1.3"
 description = "Fast, accurate, on-device AI library for building interactive voice applications"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -36,6 +36,20 @@ classifiers = [
 [project.scripts]
 moonshine-voice = "moonshine_voice.cli:main"
 moonshine = "moonshine_voice.cli:main"
+
+[project.optional-dependencies]
+lora = [
+    "torch",
+    "transformers>=5.15",
+    "safetensors",
+    "soundfile",
+    "pyarrow",
+    "scipy",
+    "jiwer",
+    "huggingface_hub",
+    "onnx",
+    "onnxscript",
+]
 
 [project.urls]
 Homepage = "https://github.com/moonshine-ai/moonshine"

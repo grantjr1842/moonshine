@@ -7,7 +7,7 @@
 
 import { AssetDownloader } from './asset-downloader.js';
 import { ModelArch, TranscribeFlags, modelArchToString } from './enums.js';
-import { wrapErrors } from './errors.js';
+import { MoonshineInvalidArgumentError, wrapErrors } from './errors.js';
 import {
   loadMoonshineModule,
   type LoadModuleOptions,
@@ -268,6 +268,61 @@ export class Transcriber {
     return wrapErrors(() =>
       normalizeTranscript(this.raw.transcribe(audio, sampleRate, flags)),
     );
+  }
+
+  /**
+   * Biases the decoder towards a list of terms, replacing any previous list.
+   *
+   * Useful for jargon, product names and proper nouns the model would otherwise
+   * be unlikely to produce. No retraining is involved, so the list can follow
+   * whatever the user is looking at and can be changed while a stream is
+   * running; it takes effect on the next transcription and does not rewrite text
+   * already emitted.
+   *
+   * Match the capitalization and spelling you want to see in the output. Pass an
+   * empty array to turn biasing off, and set the strength with the
+   * `keyterm_boost` option at load time. Only the streaming architectures can
+   * apply this; the others throw.
+   *
+   * @param keyterms Terms to bias towards, e.g. `['Kubernetes', 'Ceph']`. Commas
+   *   are the delimiter used internally, so terms must not contain them.
+   */
+  setKeyterms(keyterms: string[]): void {
+    for (const term of keyterms) {
+      if (term.includes(',')) {
+        throw new MoonshineInvalidArgumentError(
+          `Key terms cannot contain commas, which separate them: ${term}`,
+        );
+      }
+    }
+    wrapErrors(() => this.raw.setKeyterms(keyterms.join(',')));
+  }
+
+  /**
+   * Picks the key terms out of a passage of text and biases towards them,
+   * replacing any previous list.
+   *
+   * Where {@link setKeyterms} wants a list, this wants context: pass the
+   * document on screen, the agenda for the meeting, the last few messages in the
+   * thread, and the unusual words in it are found for you. A word counts as
+   * unusual when the model's own tokenizer has no single symbol for it, which is
+   * the case biasing helps with, so the judgment follows the language of the
+   * loaded model with no word lists involved.
+   *
+   * Like {@link setKeyterms}, this can be called while a stream is running,
+   * takes effect on the next transcription, and does not rewrite text already
+   * emitted. The capitalization in the passage is what gets asked for in the
+   * transcript. Only the streaming architectures can apply this; the others
+   * throw.
+   *
+   * @param context The passage to read terms out of. Pass an empty string to
+   *   turn biasing off.
+   * @param maxTerms Most terms to take, 200 by default. Worth keeping modest: a
+   *   long list costs accuracy on the words you did not ask for, so the terms
+   *   the passage leans on hardest are kept and its long tail is dropped.
+   */
+  setContext(context: string, maxTerms = 0): void {
+    wrapErrors(() => this.raw.setContext(context, maxTerms));
   }
 
   /**

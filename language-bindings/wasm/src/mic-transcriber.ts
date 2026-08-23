@@ -18,6 +18,7 @@
 
 import { AssetDownloader } from './asset-downloader.js';
 import { ModelArch, TranscribeFlags } from './enums.js';
+import { MoonshineError } from './errors.js';
 import type { TranscriptEventListener } from './events.js';
 import { Stream } from './stream.js';
 import { Transcriber, type TranscriberLoadOptions } from './transcriber.js';
@@ -248,6 +249,34 @@ export class MicTranscriber {
    */
   mute(muted = true): void {
     this.muted = muted;
+  }
+
+  /**
+   * Biases the decoder towards a list of terms while listening, replacing any
+   * previous list. See {@link Transcriber.setKeyterms}; this can be called
+   * between phrases to follow whatever the user is looking at. To start
+   * listening with a list already in place, load a {@link Transcriber} with the
+   * `keyterms` option and hand it to {@link useTranscriber}.
+   */
+  setKeyterms(keyterms: string[]): void {
+    if (!this.transcriber) {
+      throw new MoonshineError('No model loaded. Call load() before setKeyterms().');
+    }
+    this.transcriber.setKeyterms(keyterms);
+  }
+
+  /**
+   * Picks the key terms out of a passage of text and biases towards them while
+   * listening. See {@link Transcriber.setContext}; this can be called between
+   * phrases to follow the document or thread the user is in. To start listening
+   * with a passage already in place, load a {@link Transcriber} with the
+   * `context` option and hand it to {@link useTranscriber}.
+   */
+  setContext(context: string, maxTerms = 0): void {
+    if (!this.transcriber) {
+      throw new MoonshineError('No model loaded. Call load() before setContext().');
+    }
+    this.transcriber.setContext(context, maxTerms);
   }
 
   get isRunning(): boolean {

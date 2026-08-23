@@ -126,6 +126,58 @@ public class Transcriber {
         )
     }
 
+    /// Bias the decoder towards a list of terms, replacing any previous list.
+    ///
+    /// Useful for jargon, product names and proper nouns the model would
+    /// otherwise be unlikely to produce. No retraining is involved, so the list
+    /// can follow whatever the user is looking at and can be changed while a
+    /// stream is running; it takes effect on the next transcription and does not
+    /// rewrite text already emitted.
+    ///
+    /// Match the capitalization and spelling you want to see in the output.
+    /// Pass an empty array to turn biasing off. Set the strength with the
+    /// ``keyterm_boost`` option at load time.
+    /// - Parameter keyterms: Terms to bias towards, e.g. `["Kubernetes", "Ceph"]`.
+    ///   Commas are the delimiter used internally, so terms must not contain them.
+    /// - Throws: ``MoonshineError`` if a term contains a comma, or if the loaded
+    ///   model is not a streaming architecture — only those decode through a
+    ///   path that can apply the bias.
+    public func setKeyterms(_ keyterms: [String]) throws {
+        for term in keyterms where term.contains(",") {
+            throw MoonshineError.custom(
+                message: "Key terms cannot contain commas, which separate them: \(term)",
+                code: Int32(-3))  // MOONSHINE_ERROR_INVALID_ARGUMENT
+        }
+        try api.setKeyterms(transcriberHandle: handle, keyterms: keyterms.joined(separator: ","))
+    }
+
+    /// Pick the key terms out of a passage of text and bias towards them,
+    /// replacing any previous list.
+    ///
+    /// Where ``setKeyterms(_:)`` wants a list, this wants context: pass the
+    /// document on screen, the agenda for the meeting, the last few messages in
+    /// the thread, and the unusual words in it are found for you. A word counts
+    /// as unusual when the model's own tokenizer has no single symbol for it,
+    /// which is the case biasing helps with, so the judgment follows the
+    /// language of the loaded model with no word lists involved.
+    ///
+    /// Like ``setKeyterms(_:)``, this can be called while a stream is running,
+    /// takes effect on the next transcription, and does not rewrite text already
+    /// emitted. The capitalization in the passage is what gets asked for in the
+    /// transcript.
+    /// - Parameters:
+    ///   - context: The passage to read terms out of. Pass an empty string to
+    ///     turn biasing off.
+    ///   - maxTerms: Most terms to take, 200 by default. Worth keeping modest:
+    ///     a long list costs accuracy on the words you did not ask for, so the
+    ///     terms the passage leans on hardest are kept and its long tail is
+    ///     dropped.
+    /// - Throws: ``MoonshineError`` if the loaded model is not a streaming
+    ///   architecture — only those decode through a path that can apply the bias.
+    public func setContext(_ context: String, maxTerms: Int32 = 0) throws {
+        try api.setContext(transcriberHandle: handle, context: context, maxTerms: maxTerms)
+    }
+
     /// Get the default stream handle.
     public func getDefaultStream() throws -> Stream {
         if defaultStream == nil {

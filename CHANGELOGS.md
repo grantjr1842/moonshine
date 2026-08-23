@@ -2,7 +2,41 @@
 
 All notable user-facing changes to Moonshine Voice are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Please keep the bullets high level, and no more than about 200 characters.
+
+## [0.1.3]
+
+### Added
+
+- `decode_incomplete_lines` (default true). Set false to encode as audio arrives but wait until the line is complete before decoding.
+- Optional `moonshine-voice[lora]` extra trains a decoder-only LoRA adapter on your audio (ATCOSIM example included). Default inference installs are unchanged.
+
+### Changed
+
+- The LoRA Colab notebook calls the same `fit_adapter` and ATCOSIM helpers as `python -m moonshine_voice.lora` instead of inlining the trainer.
+- Streaming speaker diarization analyzes at most one segmentation window per audio append (Stop still drains the rest) and skips embedding inference on silent speaker classes.
+- Meeting Notes waits until a line is complete before decoding, and writes each finished line on its own line in the document.
+
+### Fixed
+
+- Meeting Notes playback no longer clicks from dropped capture frames, resampler phase jumps, or mixing a second copy of the meeting that the microphone heard.
+- C API streaming comments no longer refer to an undeclared `out_transcript`, a missing `moonshine-test-v2.cpp`, or the old `transcribe_stream_chunk` name.
+
+## [0.1.2] - August 13th, 2026
+
+### Added
+
+- Runtime domain customization for streaming speech-to-text: pass `keyterms` to bias decoding towards jargon, or `context` to find the terms in a passage of text. See [Domain Customization](docs/models/domain-customization.md).
+- Documentation has been reorganized in `mkdocs` style, with one file per section rather than everything in one large README.md. These docs are also available at [moonshine.readthedocs.io](https://moonshine.readthedocs.io).
+
+### Changed
+
+- `moonshine_load_transcriber_from_memory_files()` rejects an unrecognized filename key with `MOONSHINE_ERROR_INVALID_ARGUMENT`, naming it, instead of dropping it silently and reporting the file as missing.
+
+### Fixed
+
+- Meeting Notes no longer freezes for seconds when returning to its tab during a long recording: capture audio is batched and the main thread yields while catching up.
+- Core library builds no longer write into the source tree, where targets clobbered each other's archives, and the wheels, archives and Android debug variant are now optimized rather than debug builds (8-15% faster streaming on a Pixel 10a).
 
 ## [0.1.1] - August 6th, 2026
 

@@ -15,14 +15,16 @@ set -o pipefail
 # release, mirroring scripts/publish-binary.sh.
 #
 # Arguments (order-independent):
-#   publish-npm    - run `npm publish` from language-bindings/wasm/ after a successful build.
+#   publish-npm    - run `npm publish` from language-bindings/wasm/ after a successful
+#                    build. Prefer scripts/publish-wasm-npm.sh after a release so
+#                    interactive npm auth cannot stall build-all-platforms.
 #   upload         - attach a language-bindings/wasm/dist tarball to the GitHub release v<VERSION>.
 #   single-thread  - build the SIMD-only (no pthreads) variant for pages that
 #                    can't be cross-origin isolated. Default is SIMD + threads.
 #   skip-ort       - assume the ORT-wasm archive is already vendored.
 #   skip-core      - reuse an existing wasm build dir (skip emcmake/cmake build).
 
-VERSION=0.1.1
+VERSION=0.1.3
 REPO="moonshine-ai/moonshine"
 
 SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -78,16 +80,13 @@ fi
 # --- Step 2: build the embind module with Emscripten -----------------------
 if [ -z "${SKIP_CORE}" ]; then
     echo "[build-wasm] configuring + building the wasm module..."
+    # Every subproject builds into this tree (see core/CMakeLists.txt), so
+    # clearing it leaves no non-wasm archives for wasm-ld to trip over
+    # ("archive member ... is neither Wasm object file nor LLVM bitcode"). The
+    # vendored ORT-wasm library lives under lib/, not in a build tree, so this
+    # does not force an ONNX Runtime rebuild.
     rm -rf "${BUILD_DIR}"
     mkdir -p "${BUILD_DIR}"
-    # moonshine-tts and other add_subdirectory targets build into fixed dirs
-    # under core/ (e.g. core/moonshine-tts/build; see core/CMakeLists.txt) that
-    # are shared across host/iOS/wasm builds. Remove objects left by a previous
-    # host or iOS build so wasm-ld doesn't try to link non-wasm archives
-    # ("archive member ... is neither Wasm object file nor LLVM bitcode"). The
-    # vendored ORT-wasm library lives under lib/ (not a build dir), so this does
-    # not force an ONNX Runtime rebuild.
-    find "${CORE_DIR}" -type d -name build -prune -exec rm -rf {} +
     (
         cd "${BUILD_DIR}"
         emcmake cmake "${CORE_DIR}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_WASM_FLAGS[@]}"

@@ -198,6 +198,93 @@ Transcriber::Transcriber(const TranscriberOptions &options)
                                std::to_string(load_error));
     }
   }
+  // Compile the contextual-biasing key terms last, since this needs the
+  // tokenizer that the model load above brings up.
+  if (!this->options.context.empty()) {
+    // Terms named outright are kept alongside the ones the passage suggests:
+    // a caller passing both is telling us about two different things it knows.
+    std::vector<std::string> keyterms = this->options.keyterms;
+    for (const std::string &term : this->keyterms_from_context(
+             this->options.context, this->options.context_max_terms)) {
+      keyterms.push_back(term);
+    }
+    this->set_keyterms(keyterms);
+  } else if (!this->options.keyterms.empty()) {
+    this->set_keyterms(this->options.keyterms);
+  }
+}
+
+std::vector<std::string> Transcriber::keyterms_from_context(
+    const std::string &context, int32_t max_terms) {
+  if (this->streaming_model == nullptr) {
+    if (this->stt_model != nullptr) {
+      // Reported even for an empty passage, and from here rather than from
+      // set_context, so that the load option and the runtime call agree and a
+      // caller finds out from whichever one it made.
+      throw std::runtime_error(
+          "Key-term biasing requires one of the streaming model "
+          "architectures; the loaded model does not decode through a path "
+          "that can apply it.");
+    }
+    // No model at all (skip_transcription): nothing to judge words against,
+    // and nothing will be decoded either.
+    return {};
+  }
+  return ContextExtractor::extract(
+      context, max_terms, [this](const std::string &word) -> size_t {
+        try {
+          return this->streaming_model->text_to_tokens(word).size();
+        } catch (const std::exception &) {
+          // The tokenizer throws on bytes it has no token for. A context
+          // passage is whatever text the application happened to have, so one
+          // unspellable word should cost that word and nothing else.
+          return 0;
+        }
+      });
+}
+
+void Transcriber::set_context(const std::string &context, int32_t max_terms) {
+  this->set_keyterms(this->keyterms_from_context(context, max_terms));
+}
+
+void Transcriber::set_keyterms(const std::vector<std::string> &keyterms) {
+  std::lock_guard<std::mutex> lock(this->context_biaser_mutex);
+  this->options.keyterms = keyterms;
+  this->context_biaser.clear();
+  this->context_biaser.set_boost(this->options.keyterm_boost);
+  // Drop the speculative draft. It was decoded under the previous key terms,
+  // so it is no longer a useful prediction of what this configuration would
+  // produce, and letting it stand means a changed list keeps influencing the
+  // next decode through the tokens it verifies. Costs one re-decode from BOS.
+  this->last_streaming_tokens.clear();
+  if (keyterms.empty()) {
+    return;
+  }
+  if (this->streaming_model == nullptr) {
+    if (this->stt_model != nullptr) {
+      throw std::runtime_error(
+          "Key-term biasing requires one of the streaming model "
+          "architectures; the loaded model does not decode through a path "
+          "that can apply it.");
+    }
+    // No model at all (skip_transcription): there is nothing to tokenize
+    // against, and nothing will be decoded either.
+    return;
+  }
+  for (const std::string &term : keyterms) {
+    for (const std::string &variant : ContextBiaser::variants_for_term(term)) {
+      const std::vector<int32_t> tokens =
+          this->streaming_model->text_to_tokens(variant);
+      if (tokens.empty()) {
+        continue;
+      }
+      this->context_biaser.add_token_sequence(tokens);
+    }
+  }
+  if (this->options.log_output_text) {
+    LOGF("Compiled %zu key terms for contextual biasing (boost %.2f)",
+         keyterms.size(), this->context_biaser.get_boost());
+  }
 }
 
 void Transcriber::load_from_files(const char *model_path, uint32_t model_arch) {
@@ -365,6 +452,41 @@ void Transcriber::load_from_memory(const uint8_t *encoder_model_data,
         "Failed to load Moonshine models from memory. Error code: " +
         std::to_string(load_error));
   }
+}
+
+const std::vector<std::string> &recognized_transcriber_model_files() {
+  static const std::vector<std::string> keys = {
+      // Required by the non-streaming architectures.
+      "encoder_model.ort",
+      "decoder_model_merged.ort",
+      // Required by the streaming architectures.
+      "frontend.ort",
+      "encoder.ort",
+      "adapter.ort",
+      "cross_kv.ort",
+      "decoder_kv.ort",
+      "streaming_config.json",
+      // Required by both.
+      "tokenizer.bin",
+      // Optional, and only consulted when the word_timestamps option is on.
+      "decoder_with_attention.ort",
+      "alignment_model.ort",
+      "decoder_kv_with_attention.ort",
+      // Optional spelling fusion. The meta file ships in the same download
+      // group as the model but carries no information the loader needs, so it
+      // is accepted and ignored rather than rejected.
+      "spelling_cnn.ort",
+      "spelling_cnn_meta.json",
+      // Optional, and required when the identify_speakers option is on.
+      "segmentation.ort",
+      "embedding.ort",
+  };
+  return keys;
+}
+
+bool is_recognized_transcriber_model_file(const std::string &key) {
+  const std::vector<std::string> &keys = recognized_transcriber_model_files();
+  return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
 
 void Transcriber::load_from_memory_files(uint32_t model_arch) {
@@ -793,9 +915,10 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
     return;
   }
 
-  // Feed the new audio to the diarizer before it's consumed. This runs the
-  // segmentation/embedding models on new analysis chunks and re-clusters on
-  // the configured cadence, which is the main cost of identify_speakers.
+  // Feed the new audio to the diarizer before it's consumed. This runs at
+  // most one segmentation/embedding window per call (further windows wait
+  // for the next call or Stop) and re-clusters on the configured cadence,
+  // which is the main cost of identify_speakers.
   if (diarization_enabled) {
     this->speaker_diarizer->add_audio_to_stream(stream->diarizer_stream_id,
                                                 audio_data, audio_length,
@@ -1030,45 +1153,49 @@ void Transcriber::update_transcript_from_segments(
         this->streaming_model->cross_attn_steps = 0;
       }
     } else if (this->stt_model != nullptr) {
-      // Use non-streaming model for transcription
-      std::lock_guard<std::mutex> lock(this->stt_model_mutex);
-      char *out_text = nullptr;
-      int transcribe_error = this->stt_model->transcribe(
-          segment.audio_data.data(), segment.audio_data.size(), &out_text);
-      if (transcribe_error != 0) {
-        LOGF("Failed to transcribe: %d", transcribe_error);
-        throw std::runtime_error("Failed to transcribe: " +
-                                 std::to_string(transcribe_error));
-      }
-      if (this->options.log_output_text) {
-        LOGF("Transcribed text: '%s'", out_text);
-      }
-      // Ensure the output text is valid UTF-8.
-      line.text = sanitize_text(out_text);
+      if (!segment.is_complete && !this->options.decode_incomplete_lines) {
+        line.text = new std::string();
+      } else {
+        // Use non-streaming model for transcription
+        std::lock_guard<std::mutex> lock(this->stt_model_mutex);
+        char *out_text = nullptr;
+        int transcribe_error = this->stt_model->transcribe(
+            segment.audio_data.data(), segment.audio_data.size(), &out_text);
+        if (transcribe_error != 0) {
+          LOGF("Failed to transcribe: %d", transcribe_error);
+          throw std::runtime_error("Failed to transcribe: " +
+                                   std::to_string(transcribe_error));
+        }
+        if (this->options.log_output_text) {
+          LOGF("Transcribed text: '%s'", out_text);
+        }
+        // Ensure the output text is valid UTF-8.
+        line.text = sanitize_text(out_text);
 
-      // Alignment is a second pass over the segment and costs about a quarter
-      // of a streaming update, while an unfinished segment is re-transcribed
-      // from scratch every time round, so aligning one before it ends is work
-      // that gets thrown away and redone a fraction of a second later. Waiting
-      // for the end loses nothing: the detector always closes a segment with
-      // both is_complete and just_updated set, including when the stream stops
-      // mid-speech, so every line still gets aligned exactly once, against its
-      // final text. Only the non-streaming models pay this, which is why the
-      // streaming branch above aligns unconditionally -- there the timings fall
-      // out of attention the transcription pass already computed.
-      if (this->options.word_timestamps && segment.is_complete) {
-        float seg_duration =
-            segment.audio_data.size() / (float)INTERNAL_SAMPLE_RATE;
-        std::vector<TranscriberWord> words;
-        int align_err =
-            this->stt_model->compute_word_timestamps(seg_duration, words);
-        if (align_err == 0 && !words.empty()) {
-          // Offset word times by the segment's start time
-          for (auto &w : words) {
-            w.start += segment.start_time;
-            w.end += segment.start_time;
+        // Alignment is a second pass over the segment and costs about a quarter
+        // of a streaming update, while an unfinished segment is re-transcribed
+        // from scratch every time round, so aligning one before it ends is work
+        // that gets thrown away and redone a fraction of a second later. Waiting
+        // for the end loses nothing: the detector always closes a segment with
+        // both is_complete and just_updated set, including when the stream stops
+        // mid-speech, so every line still gets aligned exactly once, against its
+        // final text. Only the non-streaming models pay this, which is why the
+        // streaming branch above aligns unconditionally -- there the timings fall
+        // out of attention the transcription pass already computed.
+        if (this->options.word_timestamps && segment.is_complete) {
+          float seg_duration =
+              segment.audio_data.size() / (float)INTERNAL_SAMPLE_RATE;
+          std::vector<TranscriberWord> words;
+          int align_err =
+              this->stt_model->compute_word_timestamps(seg_duration, words);
+          if (align_err == 0 && !words.empty()) {
+            // Offset word times by the segment's start time
+            for (auto &w : words) {
+              w.start += segment.start_time;
+              w.end += segment.start_time;
+            }
+            line.words = std::move(words);
           }
-          line.words = std::move(words);
         }
       }
     } else {
@@ -1330,6 +1457,10 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
     return new std::string();
   }
 
+  if (!is_final && !this->options.decode_incomplete_lines) {
+    return new std::string();
+  }
+
   // Reset decoder state before decoding (we decode from scratch each time
   // since memory may have changed)
   this->streaming_model->decoder_reset(&this->streaming_state);
@@ -1341,6 +1472,12 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
                                           this->options.max_tokens_per_second)),
                256);
   std::vector<int64_t> tokens;
+
+  // Held across the whole decode so a concurrent set_keyterms cannot swap the
+  // trie out from under it. Always taken before streaming_model_mutex.
+  std::lock_guard<std::mutex> biaser_lock(this->context_biaser_mutex);
+  ContextBiaser *biaser =
+      this->context_biaser.empty() ? nullptr : &this->context_biaser;
 
   {
     std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
@@ -1360,7 +1497,7 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
       const int *draft_ptr = draft.empty() ? nullptr : draft.data();
       int err = this->streaming_model->decode_full(
           &this->streaming_state, draft_ptr, static_cast<int>(draft.size()),
-          &out, &out_len);
+          &out, &out_len, biaser);
       if (err != 0) {
         LOGF("Speculative decode_full failed: %d", err);
         throw std::runtime_error("Speculative decode_full failed: " +
@@ -1379,12 +1516,21 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
       tokens.push_back(config.bos_id);
       std::vector<float> logits(config.vocab_size);
       int current_token = config.bos_id;
+      // This pass decodes from BOS, so any partial key-term match left over
+      // from the previous pass is meaningless.
+      if (biaser != nullptr) {
+        biaser->reset();
+      }
 
       for (int step = 0; step < max_tokens; ++step) {
         int err = this->streaming_model->decode_step(
             &this->streaming_state, current_token, logits.data());
         if (err != 0) {
           break;
+        }
+
+        if (biaser != nullptr) {
+          biaser->apply(logits.data(), config.vocab_size);
         }
 
         // Argmax
@@ -1401,6 +1547,9 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
         current_token = next_token;
 
         if (next_token == config.eos_id) break;
+        if (biaser != nullptr) {
+          biaser->advance(next_token);
+        }
       }
     }
   }

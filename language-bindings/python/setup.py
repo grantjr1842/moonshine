@@ -46,7 +46,7 @@ def read_requirements():
 
 setup(
     name="moonshine-voice",
-    version="0.1.1",
+    version="0.1.3",
     description="Fast, accurate, on-device AI library for building interactive voice applications",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
@@ -65,6 +65,20 @@ setup(
         ],
     },
     install_requires=read_requirements(),
+    extras_require={
+        "lora": [
+            "torch",
+            "transformers>=5.15",
+            "safetensors",
+            "soundfile",
+            "pyarrow",
+            "scipy",
+            "jiwer",
+            "huggingface_hub",
+            "onnx",
+            "onnxscript",
+        ],
+    },
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",

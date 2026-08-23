@@ -5,19 +5,26 @@
 # a development cycle to confirm the branch is shippable.
 #
 # Usage:
-#   scripts/preflight-release.sh <branch> [<commit>]
+#   scripts/preflight-release.sh [--dry-run] <branch> [<commit>]
 #
 # <commit> defaults to the branch's pushed tip and may be any commit-ish.
 #
+# With --dry-run, credentials that only the upload stages use are reported as
+# warnings instead of failures, because a dry run never reaches the code that
+# needs them. Blocking a rehearsal on a credential it will not touch just
+# teaches you to skip preflight altogether.
+#
 # These checks exist because the failures they catch are expensive: the publish
-# stages push to PyPI, Maven Central, npm and GitHub Releases, none of which let
-# you re-upload a version. A mistake found four hours in, after half the
-# registries have accepted an artifact, costs a burned version number. Every
-# check here is one that can be made cheaply up front.
+# stages push to PyPI, Maven Central and GitHub Releases, none of which let
+# you re-upload a version. npm (@moonshine-ai/moonshine-wasm) is a separate
+# manual step via scripts/publish-wasm-npm.sh. A mistake found four hours in,
+# after half the registries have accepted an artifact, costs a burned version
+# number. Every check here is one that can be made cheaply up front.
 
 set -uo pipefail
 
 FAILURES=0
+DRY_RUN=""
 
 fail() {
     echo "  FAIL: $1" >&2
@@ -29,13 +36,35 @@ fail() {
     FAILURES=$((FAILURES + 1))
 }
 
+warn() {
+    echo "  WARN: $1" >&2
+    shift
+    while [ $# -gt 0 ]; do
+        echo "        $1" >&2
+        shift
+    done
+}
+
+# For problems that only matter once something is actually uploaded.
+publish_only_fail() {
+    if [ -n "${DRY_RUN}" ]; then
+        warn "$@" "(not fatal for a dry run, but fix it before publishing)"
+    else
+        fail "$@"
+    fi
+}
+
 pass() {
     echo "  ok: $1"
 }
 
 main() {
+    if [ "${1:-}" = "--dry-run" ]; then
+        DRY_RUN=1
+        shift
+    fi
     if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-        echo "Usage: $0 <branch> [<commit>]" >&2
+        echo "Usage: $0 [--dry-run] <branch> [<commit>]" >&2
         exit 1
     fi
 
@@ -115,12 +144,16 @@ main() {
             if npm whoami >/dev/null 2>&1; then
                 pass "npm is authenticated as $(npm whoami 2>/dev/null)"
             else
-                fail "npm is not authenticated; build-wasm publish-npm will fail" \
-                    "and the web demos' jsDelivr CDN import will 404." \
-                    "  npm login"
+                # npm publish is no longer part of build-all-platforms; it is a
+                # manual follow-up (scripts/publish-wasm-npm.sh) so a missing
+                # login must not block the multi-hour release.
+                warn "npm is not authenticated; run scripts/publish-wasm-npm.sh" \
+                    "after the release (and npm login) so jsDelivr can serve" \
+                    "@moonshine-ai/moonshine-wasm."
             fi
         else
-            fail "npm is not installed; the wasm publish stage needs it."
+            warn "npm is not installed; scripts/publish-wasm-npm.sh will need it" \
+                "after the release to publish @moonshine-ai/moonshine-wasm."
         fi
     else
         fail "gh is not installed; the release upload stages need it."

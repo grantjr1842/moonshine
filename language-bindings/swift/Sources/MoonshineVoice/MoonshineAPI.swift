@@ -216,6 +216,30 @@ internal final class MoonshineAPI: @unchecked Sendable {
         try checkError(error)
     }
 
+    /// Replace the contextual-biasing key terms on a live transcriber.
+    func setKeyterms(transcriberHandle: Int32, keyterms: String) throws {
+        let error = keyterms.withCString { keytermsC in
+            moonshine_transcriber_set_keyterms(transcriberHandle, keytermsC)
+        }
+        if error < 0 {
+            let errorString = errorToString(error)
+            throw MoonshineError.custom(
+                message: "Failed to set key terms: \(errorString)", code: error)
+        }
+    }
+
+    /// Pick the key terms out of a passage of text on a live transcriber.
+    func setContext(transcriberHandle: Int32, context: String, maxTerms: Int32) throws {
+        let error = context.withCString { contextC in
+            moonshine_transcriber_set_context(transcriberHandle, contextC, maxTerms)
+        }
+        if error < 0 {
+            let errorString = errorToString(error)
+            throw MoonshineError.custom(
+                message: "Failed to set context: \(errorString)", code: error)
+        }
+    }
+
     /// Add audio data to a stream.
     func addAudioToStream(
         transcriberHandle: Int32,

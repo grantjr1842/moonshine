@@ -333,7 +333,25 @@
         padding: 0 0.25rem;
         margin-left: -0.25rem;
         border-radius: 0.2rem;
-        cursor: text;
+        /* A name is also the boundary it sits on, and is dragged to move it,
+           so the hand wins over the I-beam: renaming is a click, which a grab
+           cursor does not take away, while nothing else on the page would
+           suggest the label can be picked up. `-webkit-user-drag` is what
+           actually lifts the whole element rather than a selection of its
+           text, which is the difference between dragging a name and dragging
+           the word "Speaker". */
+        cursor: grab;
+        -webkit-user-drag: element;
+      }
+
+      .who:active {
+        cursor: grabbing;
+      }
+
+      /* Left behind while its drag is in the air, so the mark below is clearly
+         where the name is going rather than where it already is. */
+      .who.is-moving {
+        opacity: 0.35;
       }
 
       /* The names are editable, and editing one renames that speaker
@@ -345,6 +363,45 @@
 
       .who[data-src="you"] {
         color: #2f6f4f;
+      }
+
+      /* Where the boundary would land, in the red of the margin rule so it
+         reads as a mark made on the paper rather than as selected text.
+         Positioned against the viewport and parked in the body, because
+         anything put inside the sheet is inside a contenteditable: the reader
+         could type into it, and the exporter would have to know to skip it. */
+      .cut {
+        position: fixed;
+        z-index: 5;
+        width: 2px;
+        background: #c44e4e;
+        border-radius: 1px;
+        pointer-events: none;
+      }
+
+      /* Adding a name leaves the one being dragged where it is, so the mark
+         changes colour the moment Alt goes down: the only place the page can
+         say which of the two gestures is in progress is the mark itself. */
+      .cut.is-adding {
+        background: #2f6f4f;
+      }
+
+      .cut::before {
+        content: "";
+        position: absolute;
+        top: -0.3rem;
+        left: -0.22rem;
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: inherit;
+      }
+
+      /* One completed phrase per ruled line, rather than running on as a
+         single paragraph. A block so a new line starts as soon as the
+         recognizer finishes, and so export starts a paragraph there too. */
+      .ln {
+        display: block;
       }
 
       /* The line whose audio is playing right now. */
@@ -543,7 +600,11 @@
         <span id="clock" class="deck__time">0:00 / 0:00</span>
         <span id="playHint" class="deck__hint">
           Click where you want to start, or select some text to hear just that.
-          Rename a speaker and every line of theirs follows.
+          Rename a speaker and every line of theirs follows; give two of them
+          the same name and they become one person. Drag a name into the words
+          above or below it to move where that speaker starts; Alt-drag to
+          leave a second name there instead, or Alt-click the words to start a
+          speaker nobody has heard yet.
         </span>
       </div>
 
@@ -643,7 +704,13 @@
       // recording and playback — without a share to grant.
       const noCapture = params.get('nocapture') === '1';
       const fakeScreen = params.get('fakescreen') === '1';
-      const { Transcriber, ModelArch } = await import(moduleUrl);
+      // Profiling / tests: `speakers=0` skips diarization models on the
+      // meeting stream. Applied before warmStart, which is when the option is
+      // read. `nomics=1` transcribes only the meeting share.
+      // `arch=medium` with local assets loads Medium Streaming from
+      // /test-assets/medium-streaming-en instead of tiny. Decoding waits
+      // until VAD closes a line; `decode=live` restores in-progress text.
+      const { SttWorkerHost, sttWorkerSupported, ModelArch } = await import(moduleUrl);
 
       mountChrome({
         active: 'meeting-notes',
@@ -675,6 +742,10 @@
         lampRec: document.getElementById('lampRec'),
       };
 
+      if (params.get('speakers') === '0') els.optSpeakers.checked = false;
+      if (params.get('speakers') === '1') els.optSpeakers.checked = true;
+      const noMics = params.get('nomics') === '1';
+
       const INSTRUCTIONS = els.doc.dataset.placeholder;
       const LINE = parseFloat(getComputedStyle(els.doc).lineHeight) || 32;
 
@@ -696,6 +767,7 @@
       const isEmpty = () => els.doc.textContent.replace(/\s+/g, '') === '';
 
       function render() {
+        const t0 = performance.now();
         const current = state();
         els.record.disabled = current === 'loading' || (noCapture && current === 'ready');
         els.record.setAttribute(
@@ -711,6 +783,7 @@
         els.play.disabled = !haveAudio;
         els.wav.disabled = !haveAudio;
         els.srt.disabled = lines.size === 0;
+        noteRender(performance.now() - t0);
       }
 
       function fail(err) {
@@ -735,7 +808,7 @@
       // setting rather than a given, and the figure is on screen while it grows.
 
       const recording = {
-        samples: new Int16Array(RATE * 60),
+        samples: new Float32Array(RATE * 60),
         length: 0,
         /** Recording length when the current capture session began. */
         sessionStart: 0,
@@ -744,7 +817,7 @@
           if (needed <= this.samples.length) return;
           let capacity = this.samples.length;
           while (capacity < needed) capacity *= 2;
-          const grown = new Int16Array(capacity);
+          const grown = new Float32Array(capacity);
           grown.set(this.samples.subarray(0, this.length));
           this.samples = grown;
         },
@@ -754,25 +827,80 @@
          * The two sources are written independently, so this is a mix rather
          * than an append: the microphone and the meeting are usually both
          * making noise at the same moment.
+         *
+         * Accumulated as float so two full-scale streams can be converted with
+         * a soft clip at export instead of wrapping into a click on every peak.
          */
         mixAt(offset, chunk) {
           this.ensure(offset + chunk.length);
           for (let i = 0; i < chunk.length; i++) {
-            const at = offset + i;
-            const sum = this.samples[at] + Math.round(chunk[i] * 32767);
-            this.samples[at] = sum > 32767 ? 32767 : sum < -32768 ? -32768 : sum;
+            this.samples[offset + i] += chunk[i];
           }
-          if (offset + chunk.length > this.length) this.length = offset + chunk.length;
+          this.grewTo(offset + chunk.length);
+        },
+
+        /**
+         * Mixes microphone audio, skipping chunks that are just the meeting
+         * leaking through the speakers.
+         *
+         * Subtracting a delay-matched echo used to be the way to keep the
+         * person in the room while dropping YouTube-through-speakers. The delay
+         * hops between chunks, though, and the leftover residual is a crackle.
+         * If this slice is clearly the meeting, drop it; otherwise add it as-is.
+         */
+        mixMicAt(offset, chunk) {
+          this.ensure(offset + chunk.length);
+          const n = chunk.length;
+          const maxDelay = Math.min(offset, Math.round(RATE * 0.12));
+          const step = Math.max(1, Math.round(RATE * 0.002));
+          let bestCorr = 0;
+          for (let delay = 0; delay <= maxDelay; delay += step) {
+            let num = 0;
+            let energy = 0;
+            let micEnergy = 0;
+            for (let i = 0; i < n; i++) {
+              const echo = this.samples[offset + i - delay];
+              const mic = chunk[i];
+              num += echo * mic;
+              energy += echo * echo;
+              micEnergy += mic * mic;
+            }
+            const corr = num / (Math.sqrt(energy * micEnergy) || 1e-12);
+            if (corr > bestCorr) bestCorr = corr;
+          }
+          if (bestCorr > 0.55) {
+            this.grewTo(offset + n);
+            return;
+          }
+          for (let i = 0; i < n; i++) {
+            this.samples[offset + i] += chunk[i];
+          }
+          this.grewTo(offset + n);
+        },
+
+        grewTo(end) {
+          if (end > this.length) {
+            this.length = end;
+            scheduleClock();
+          }
         },
 
         reset() {
-          this.samples = new Int16Array(RATE * 60);
+          this.samples = new Float32Array(RATE * 60);
           this.length = 0;
           this.sessionStart = 0;
         },
       };
 
       const seconds = (sampleIndex) => sampleIndex / RATE;
+
+      /** Peak-safe conversion for the playable / downloadable WAV. */
+      function floatToInt16(x) {
+        const y = x < -1 || x > 1 ? Math.tanh(x) : x;
+        if (y >= 1) return 32767;
+        if (y <= -1) return -32768;
+        return Math.round(y * 32767);
+      }
 
       function clockText(at, total) {
         const mmss = (t) => {
@@ -822,8 +950,16 @@
 
       const speakerKey = (source, speaker) => `${source}:${speaker ?? ''}`;
 
+      /** The number given to each speaker the reader has introduced. */
+      const addedNumbers = new Map();
+
       function defaultName(source, speaker) {
         if (source === 'you') return 'You';
+        // A speaker the reader introduced is numbered when they introduce
+        // them, since there is no recognizer index to count from.
+        if (source === 'added') {
+          return `Speaker ${addedNumbers.get(speakerKey(source, speaker))}`;
+        }
         return speaker === null || speaker === undefined
           ? 'Meeting'
           : `Speaker ${speaker + 1}`;
@@ -841,6 +977,24 @@
 
       const speakerName = (key, source, speaker) =>
         speakerNames.get(key) || defaultName(source, speaker);
+
+      /**
+       * Whether two speaker ids are one person as far as the reader is
+       * concerned: different voices to the recognizer, one name from them.
+       *
+       * Diarization splits a single voice in two often enough -- somebody
+       * turns away from the microphone, or joins again from a worse line --
+       * and the reader says so by typing the same name over both. Two turns
+       * running, headed by the same name, is not what they asked for.
+       *
+       * Only names the reader typed count. Two speakers can come to show the
+       * same invented "Speaker 3" by coincidence, and those are two people the
+       * page has failed to tell apart rather than one it should join up.
+       */
+      function sameNamedSpeaker(a, b) {
+        const name = speakerNames.get(a);
+        return name !== undefined && name === speakerNames.get(b);
+      }
 
       /** Every heading on the page belonging to one speaker. */
       const headingsFor = (key) =>
@@ -877,10 +1031,29 @@
         if (!key) return;
         const name = heading.textContent.replace(/\s+/g, ' ').trim();
         if (!name) return;
-        speakerNames.set(key, name);
-        for (const other of headingsFor(key)) {
-          if (other !== heading && other.textContent !== name) other.textContent = name;
+        renaming = heading;
+        // A turn can be more than one speaker: ids the reader has already
+        // given a single name to are laid out as one run under one heading, so
+        // a rename has to reach all of them. Reaching only the heading's own
+        // id would leave the others answering to the name before, and the next
+        // re-cut would pull the turn apart again along a seam the reader
+        // thought they had closed.
+        for (const renamed of speakersUnder(heading)) {
+          speakerNames.set(renamed, name);
+          for (const other of headingsFor(renamed)) {
+            if (other !== heading && other.textContent !== name) other.textContent = name;
+          }
         }
+      }
+
+      /** Every speaker id with words under one heading, its own included. */
+      function speakersUnder(heading) {
+        const keys = new Set([heading.dataset.who]);
+        for (const span of turnAfter(heading)?.querySelectorAll('.ln') ?? []) {
+          const line = lines.get(span.dataset.line);
+          if (line) keys.add(speakerKey(line.source, line.speaker));
+        }
+        return keys;
       }
 
       /**
@@ -900,14 +1073,24 @@
         }
 
         lines.set(id, { startTime, endTime, source, speaker, text: words });
+        // A meeting line can arrive after the microphone already heard the same
+        // words; drop any held mic duplicates now rather than waiting out the
+        // grace timer, and retract any that already made it onto the page.
+        if (source === 'meeting') {
+          dropHeldMicEchoes();
+          if (dropCommittedMicEchoes()) {
+            queueMicrotask(() => regroupTurns());
+          }
+        }
 
         // A turn is one speaker's uninterrupted run of lines. Blocks rather
         // than inline runs, so that each turn exports as its own paragraph with
         // the label on the line above rather than jammed against the first
         // word: the exporter starts a paragraph at a block, and both the label
-        // and the turn are blocks.
+        // and the turn are blocks. Each finished line is a block too, so the
+        // next phrase starts on a new line instead of running on.
         const key = speakerKey(source, speaker);
-        if (key !== lastLabelled || !currentTurn) {
+        if ((key !== lastLabelled && !sameNamedSpeaker(key, lastLabelled)) || !currentTurn) {
           els.doc.append(newHeading(source, speaker));
           currentTurn = document.createElement('div');
           currentTurn.className = 'turn';
@@ -915,25 +1098,51 @@
           lastLabelled = key;
         }
 
-        const span = document.createElement('span');
+        const span = document.createElement('div');
         span.className = 'ln';
         span.dataset.line = id;
         span.dataset.src = source;
         span.textContent = `${words} `;
         currentTurn.append(span);
 
+        markChanged();
         render();
         keepWritingInView();
+        noteTranscriptUpdate(source, 'line', endTime);
       }
 
       function newHeading(source, speaker) {
         const key = speakerKey(source, speaker);
         const who = document.createElement('div');
         who.className = 'who';
+        who.draggable = true;
+        // Both of the things a name can do, said where someone wondering about
+        // the grab cursor will be looking. A gesture nothing on the page
+        // points at is a gesture nobody finds.
+        who.title = 'Click to rename. Drag into the words to move where this speaker starts.';
         who.dataset.src = source;
         who.dataset.who = key;
         who.textContent = speakerName(key, source, speaker);
         return who;
+      }
+
+      /** The source and speaker a heading stands for, read back off its key. */
+      function attributionOf(heading) {
+        const [source, speaker] = (heading.dataset.who ?? '').split(':');
+        return { source, speaker: speaker === '' ? null : Number(speaker) };
+      }
+
+      /** The turn a heading names, and the one belonging to the name above it. */
+      const turnAfter = (heading) => sibling(heading, 'nextElementSibling', 'turn');
+      const turnBefore = (heading) => sibling(heading, 'previousElementSibling', 'turn');
+      const headingAbove = (heading) => {
+        const before = turnBefore(heading);
+        return before ? sibling(before, 'previousElementSibling', 'who') : null;
+      };
+
+      function sibling(el, direction, className) {
+        const next = el[direction];
+        return next?.classList.contains(className) ? next : null;
       }
 
       /** Set while a revised set of speakers is waiting to be laid out. */
@@ -941,6 +1150,9 @@
 
       /** Set when a heading could not be relabelled because it was being typed into. */
       let regroupDeferred = false;
+
+      /** The heading being renamed, until the caret leaves it. */
+      let renaming = null;
 
       /** How many times the page has been re-cut, which the test watches. */
       let regroups = 0;
@@ -967,6 +1179,10 @@
         // standing guess about who is talking and put a "Meeting" heading back.
         if (speaker === null || speaker === undefined) return;
         if (!line || line.speaker === speaker) return;
+        // A line the reader has attributed by hand is settled. They can see
+        // the transcript and hear the meeting; the recognizer has only heard
+        // it, and has already been wrong about this one once.
+        if (line.manual) return;
         lines.set(id, { ...line, speaker });
         if (regroupPending) return;
         regroupPending = true;
@@ -997,7 +1213,7 @@
           if (!line) continue;
           const key = speakerKey(line.source, line.speaker);
           const last = runs[runs.length - 1];
-          if (last && last.key === key) last.spans.push(span);
+          if (last && (last.key === key || sameNamedSpeaker(last.key, key))) last.spans.push(span);
           else runs.push({ key, source: line.source, speaker: line.speaker, spans: [span] });
         }
         if (!runs.length) return;
@@ -1064,10 +1280,334 @@
         return have.length === spans.length && spans.every((span, i) => have[i] === span);
       }
 
+      // --- Moving a boundary by dragging its name -------------------------------
+      // Diarization is far likelier to get the words right and the join between
+      // two speakers slightly wrong than the other way about: a trailing "yeah"
+      // or an opening clause ends up under the name before it. The fix is the
+      // same shape as the mistake, so it is the same gesture -- the name *is*
+      // the boundary, so pick it up and put it where the boundary should have
+      // been. Dropped into the words above, those words join this speaker;
+      // dropped into this speaker's own words, the ones it has been dragged
+      // past go back to the speaker before.
+      //
+      // No further than those two runs. A name that could be dropped anywhere
+      // would be inviting the reader to re-cut the meeting by hand, and a join
+      // can only be somewhere between the two runs it separates, so everywhere
+      // else is a drop that could only have been a mistake.
+      //
+      // Two more operations fall out of that one rather than being built:
+      //
+      //   Adding a name is the same drag with Alt held, which is the copy
+      //   gesture everywhere else. The name lands as a second heading and the
+      //   words after it change hands, while the original stays where it was.
+      //   That covers the case the boundary drag cannot -- someone else spoke
+      //   in the middle of a run and diarization never noticed, so there is no
+      //   join there to move -- and needs no button of its own.
+      //
+      //   Deleting one needs nothing at all. Drop a name at the end of its own
+      //   words and its run is empty; re-cutting the page then finds one run
+      //   where there were two and drops the spare heading, which is the same
+      //   path a heading takes when diarization changes its mind.
+
+      /** The heading being dragged, while it is in the air. */
+      let dragged = null;
+
+      /** The mark showing where the boundary would land if it were let go. */
+      const cutMark = document.createElement('div');
+      cutMark.className = 'cut';
+      cutMark.hidden = true;
+      document.body.append(cutMark);
+
+      /** The caret under a point, however this browser spells the question. */
+      function caretAt(x, y) {
+        if (document.caretPositionFromPoint) {
+          const at = document.caretPositionFromPoint(x, y);
+          return at ? { node: at.offsetNode, offset: at.offset } : null;
+        }
+        const range = document.caretRangeFromPoint?.(x, y);
+        return range ? { node: range.startContainer, offset: range.startOffset } : null;
+      }
+
+      /**
+       * Where a drop or a click at this point would put the boundary, or null
+       * for nowhere.
+       *
+       * `within` holds it to the two runs either side of one name, which is
+       * the only place a join between those two speakers could be. Passing
+       * null allows anywhere, which is what putting a name down rather than
+       * moving one means.
+       *
+       * Snapped to the nearest gap between words, because a boundary inside a
+       * word is not something a meeting can have: half a word under each name
+       * reads as damage rather than as an attribution.
+       */
+      function boundaryAt(x, y, within) {
+        const caret = caretAt(x, y);
+        if (!caret || caret.node.nodeType !== Node.TEXT_NODE) return null;
+        const span = blockAt(caret.node, '.ln');
+        const turn = blockAt(caret.node, '.turn');
+        if (!span || !turn || !lines.has(span.dataset.line)) return null;
+        // Moving a join needs a run on each side of it. The opening name of
+        // the page has nothing above it to hand words to or take them from.
+        if (within) {
+          if (turn !== turnBefore(within) && turn !== turnAfter(within)) return null;
+          if (!headingAbove(within)) return null;
+        }
+
+        const text = caret.node.data;
+        let left = caret.offset;
+        let right = caret.offset;
+        while (left > 0 && !/\s/.test(text[left - 1])) left--;
+        while (right < text.length && !/\s/.test(text[right])) right++;
+        const offset = caret.offset - left <= right - caret.offset ? left : right;
+        return { node: caret.node, offset, span, turn };
+      }
+
+      function showCut(where, adding) {
+        const caret = document.createRange();
+        caret.setStart(where.node, where.offset);
+        caret.collapse(true);
+        let rect = caret.getBoundingClientRect();
+        // A collapsed range measures nothing at a soft wrap, so ask about the
+        // character beside it instead and take the edge they share.
+        if (!rect.height) {
+          const probe = caret.cloneRange();
+          const ahead = where.offset < where.node.data.length;
+          if (ahead) probe.setEnd(where.node, where.offset + 1);
+          else probe.setStart(where.node, Math.max(0, where.offset - 1));
+          const box = probe.getBoundingClientRect();
+          if (!box.height) return hideCut();
+          rect = new DOMRect(ahead ? box.left : box.right, box.top, 0, box.height);
+        }
+
+        // The sheet scrolls, so a boundary can be measured well outside it.
+        const paper = els.doc.getBoundingClientRect();
+        const top = Math.max(rect.top, paper.top);
+        const bottom = Math.min(rect.bottom, paper.bottom);
+        if (bottom - top < rect.height / 2) return hideCut();
+
+        cutMark.hidden = false;
+        cutMark.classList.toggle('is-adding', adding);
+        cutMark.style.left = `${rect.left - 1}px`;
+        cutMark.style.top = `${top}px`;
+        cutMark.style.height = `${bottom - top}px`;
+      }
+
+      function hideCut() {
+        cutMark.hidden = true;
+      }
+
+      /**
+       * Cuts the line a boundary falls inside in two, so that the boundary
+       * lies between two whole spans.
+       *
+       * Returns the first span at or after it, which is null when the boundary
+       * is at the end of the run. A line is a sentence or so of speech and the
+       * misattributed fragment is very often shorter than that, so a boundary
+       * that could only fall between lines would be no use against the mistake
+       * it exists to fix.
+       *
+       * The halves divide the line's stretch of recording between them in
+       * proportion to their length. That is a guess -- nobody speaks at a
+       * constant rate -- but it is a guess that keeps playback landing on
+       * roughly the right words and keeps the captions in order.
+       */
+      function splitLineAt({ node, offset, span, turn }) {
+        const line = lines.get(span.dataset.line);
+        const head = document.createRange();
+        head.setStart(span, 0);
+        head.setEnd(node, offset);
+        const before = head.toString();
+        const after = span.textContent.slice(before.length);
+        // Whitespace on one side of it means the boundary is already between
+        // two lines, whichever character the caret happened to name.
+        if (!before.trim()) return span;
+        if (!after.trim()) return spanAfter(turn, span);
+
+        const tail = document.createElement('div');
+        tail.className = 'ln';
+        tail.dataset.src = span.dataset.src;
+        tail.dataset.line = `${span.dataset.line}+${nextLocalId++}`;
+        const rest = document.createRange();
+        rest.setStart(node, offset);
+        rest.setEnd(span, span.childNodes.length);
+        // Extracted rather than re-typed, so bold, italics and anything else
+        // the reader has done to those words comes across with them.
+        tail.append(rest.extractContents());
+        span.after(tail);
+
+        const share = before.length / (before.length + after.length);
+        const at = line.startTime + (line.endTime - line.startTime) * share;
+        lines.set(span.dataset.line, { ...line, endTime: at, text: before.trim() });
+        lines.set(tail.dataset.line, { ...line, startTime: at, text: after.trim() });
+        return tail;
+      }
+
+      /**
+       * The next line span in a turn. Its own next sibling would do until a
+       * reader emboldens a phrase that runs across two lines, at which point
+       * the browser wraps both spans and they stop being siblings.
+       */
+      function spanAfter(turn, span) {
+        const spans = [...turn.querySelectorAll('.ln')];
+        return spans[spans.indexOf(span) + 1] ?? null;
+      }
+
+      /**
+       * Hands a line to a speaker, and stops the recognizer arguing about it.
+       *
+       * Diarization goes on revising who spoke for a couple of minutes after
+       * the words land -- which is exactly the window in which a reader
+       * notices a wrong attribution and fixes it -- and would otherwise put
+       * back what they had just corrected.
+       */
+      function attribute(span, { source, speaker }) {
+        const line = lines.get(span.dataset.line);
+        if (!line) return;
+        lines.set(span.dataset.line, { ...line, source, speaker, manual: true });
+        span.dataset.src = source;
+      }
+
+      function moveBoundary(heading, where, adding) {
+        // The words after the mark belong to the name dropped on them, unless
+        // the name was dropped into its own run, where the words it has been
+        // dragged past are the ones that change hands.
+        const claimsAfter = adding || where.turn !== turnAfter(heading);
+        const owner = sibling(where.turn, 'previousElementSibling', 'who');
+        // A name dropped on words already under it says nothing new, and
+        // should not leave a line cut in two to prove it.
+        if (claimsAfter && owner?.dataset.who === heading.dataset.who) return;
+
+        const boundary = splitLineAt(where);
+        const spans = [...where.turn.querySelectorAll('.ln')];
+        const at = boundary ? spans.indexOf(boundary) : spans.length;
+
+        if (claimsAfter) {
+          for (const span of spans.slice(at)) attribute(span, attributionOf(heading));
+        } else {
+          // Dropped into its own words, so the name has moved down the page
+          // and the words it has left behind belong to the name above it.
+          const above = headingAbove(heading);
+          if (!above) return;
+          for (const span of spans.slice(0, at)) attribute(span, attributionOf(above));
+        }
+        markChanged();
+        regroupTurns();
+      }
+
+      /** How many speakers the reader has introduced, for keys of their own. */
+      let addedSpeakers = 0;
+
+      /**
+       * A speaker the recognizer never found.
+       *
+       * Diarization can only tell apart the voices it has separated, and it
+       * does sometimes miss one outright: a brief interjection, or someone who
+       * only ever speaks over other people. There is then no name anywhere on
+       * the page to copy, so this makes one. It is numbered in a sequence of
+       * its own, so that a voice diarization separates out later cannot land
+       * on this one's key and silently become the same person; the number it
+       * is shown by is only a placeholder for whatever the reader calls them,
+       * but it still has to be one nobody else on the page is using.
+       */
+      function newSpeaker() {
+        const speaker = addedSpeakers++;
+        addedNumbers.set(speakerKey('added', speaker), freeSpeakerNumber());
+        return { source: 'added', speaker };
+      }
+
+      function freeSpeakerNumber() {
+        let taken = 0;
+        for (const line of lines.values()) {
+          if (line.source === 'meeting' && typeof line.speaker === 'number') {
+            taken = Math.max(taken, line.speaker + 1);
+          }
+        }
+        for (const number of addedNumbers.values()) taken = Math.max(taken, number);
+        for (const name of speakerNames.values()) {
+          const numbered = /^Speaker (\d+)$/.exec(name);
+          if (numbered) taken = Math.max(taken, Number(numbered[1]));
+        }
+        return taken + 1;
+      }
+
+      /** Gives the rest of a run to a speaker who has not been heard of yet. */
+      function addSpeakerAt(where) {
+        const boundary = splitLineAt(where);
+        const spans = [...where.turn.querySelectorAll('.ln')];
+        const at = boundary ? spans.indexOf(boundary) : spans.length;
+        // A name with no words under it is not a name.
+        if (at >= spans.length) return;
+        const speaker = newSpeaker();
+        for (const span of spans.slice(at)) attribute(span, speaker);
+        markChanged();
+        regroupTurns();
+      }
+
+      // Alt-click is Alt-drag with nothing in hand, and means the same thing:
+      // somebody else is talking from here. With no name being carried there
+      // is nobody to say it was, so the page makes a new speaker and leaves
+      // the reader to say who. One click only: two is how a word is selected,
+      // and three how a sentence is.
+      els.doc.addEventListener('click', (event) => {
+        if (!event.altKey || event.detail !== 1) return;
+        const where = boundaryAt(event.clientX, event.clientY, null);
+        if (where) addSpeakerAt(where);
+      });
+
+      els.doc.addEventListener('dragstart', (event) => {
+        const heading = headingAt(event.target);
+        if (!heading) return;
+        dragged = heading;
+        heading.classList.add('is-moving');
+        // Firefox will not begin a drag with an empty clipboard, and the name
+        // is the honest thing to put on it.
+        event.dataTransfer.setData('text/plain', heading.textContent);
+        event.dataTransfer.effectAllowed = 'copyMove';
+      });
+
+      els.doc.addEventListener('dragover', (event) => {
+        if (!dragged) return;
+        // Taken over whole. What a drag over editable text does by default is
+        // drop the thing being dragged into it, and the thing being dragged
+        // here is a heading, which would land in the middle of a sentence.
+        event.preventDefault();
+        const where = boundaryAt(event.clientX, event.clientY, event.altKey ? null : dragged);
+        event.dataTransfer.dropEffect = !where ? 'none' : event.altKey ? 'copy' : 'move';
+        if (where) showCut(where, event.altKey);
+        else hideCut();
+      });
+
+      // A drag that has wandered off the sheet is not pointing at anything.
+      document.addEventListener('dragover', (event) => {
+        if (dragged && !els.doc.contains(event.target)) hideCut();
+      });
+
+      els.doc.addEventListener('drop', (event) => {
+        if (!dragged) return;
+        event.preventDefault();
+        const heading = dragged;
+        const where = boundaryAt(event.clientX, event.clientY, event.altKey ? null : heading);
+        endDrag();
+        if (where) moveBoundary(heading, where, event.altKey);
+      });
+
+      els.doc.addEventListener('dragend', endDrag);
+
+      function endDrag() {
+        dragged?.classList.remove('is-moving');
+        dragged = null;
+        hideCut();
+      }
+
       /** The in-flight phrase for one source, shown until the line finishes. */
       const provisional = new Map();
 
-      function showProvisional(source, text) {
+      function showProvisional(source, text, endTime) {
+        // A background tab cannot be read, and updating the sheet there is
+        // work that piles up with the audio queue. Completed lines still land;
+        // only the in-flight ghost text is skipped until the reader looks back.
+        if (document.hidden) return;
         let span = provisional.get(source);
         if (!text) return discardProvisional(source);
         if (!span) {
@@ -1081,6 +1621,7 @@
         els.doc.append(span);
         render();
         keepWritingInView();
+        noteTranscriptUpdate(source, 'provisional', endTime);
       }
 
       function discardProvisional(source) {
@@ -1132,6 +1673,7 @@
         const heading = editedHeading();
         if (heading) renameSpeaker(heading);
         adoptOrphans();
+        markChanged();
         render();
       });
 
@@ -1326,7 +1868,15 @@
       // it rather than deleted from under them.
 
       const ECHO_OVERLAP = 0.3;
-      const ECHO_GRACE_MS = 1200;
+      // Meeting and microphone can split the same sentence on different
+      // boundaries, so a mic line that starts just after a meeting line ended
+      // is still the same speech leaking through the speakers.
+      const ECHO_NEAR_S = 1.5;
+      // Long enough that a meeting diarization pass can finish the same words
+      // before a microphone duplicate is written. The microphone stream is
+      // cheaper, so it can complete a pass while the meeting stream is still
+      // in one; this bound has to outlast that wait.
+      const ECHO_GRACE_MS = 6000;
 
       const heldMicLines = [];
 
@@ -1338,6 +1888,12 @@
           const shared = Math.max(0, end - start);
           const span = candidate.endTime - candidate.startTime;
           if (span > 0 && shared / span > ECHO_OVERLAP) return true;
+          if (
+            candidate.startTime < line.endTime + ECHO_NEAR_S &&
+            candidate.endTime > line.startTime - ECHO_NEAR_S
+          ) {
+            return true;
+          }
         }
         return false;
       }
@@ -1353,13 +1909,281 @@
         }, ECHO_GRACE_MS);
       }
 
+      function dropHeldMicEchoes() {
+        for (let i = heldMicLines.length - 1; i >= 0; i--) {
+          if (overlapsMeeting(heldMicLines[i])) heldMicLines.splice(i, 1);
+        }
+      }
+
+      /**
+       * Meeting audio can take a pass longer than the grace window. Echoes
+       * that were already written are pulled back off the page once the
+       * matching meeting line exists, rather than left as a second copy.
+       */
+      function dropCommittedMicEchoes() {
+        if (!els.optEcho.checked) return false;
+        let dropped = false;
+        for (const [id, line] of [...lines]) {
+          if (line.source !== 'you') continue;
+          if (!overlapsMeeting(line)) continue;
+          lines.delete(id);
+          els.doc.querySelector(`.ln[data-line="${CSS.escape(id)}"]`)?.remove();
+          dropped = true;
+        }
+        return dropped;
+      }
+
       // --- Capture -------------------------------------------------------------
 
       let audioContext = null;
       let displayStream = null;
       let micStream = null;
       let transcribers = [];
+      let sttHost = null;
       const cursors = new Map();
+      /** Mic chunks waiting until the meeting stream has filled the same time. */
+      const micHold = [];
+
+      function flushMicHold({ force = false } = {}) {
+        const meetingAt = cursors.get('meeting') ?? 0;
+        while (micHold.length) {
+          const next = micHold[0];
+          if (!force && next.at + next.chunk.length > meetingAt) break;
+          micHold.shift();
+          recording.mixMicAt(next.at, next.chunk);
+        }
+      }
+
+      // Cheap counters for the integration test (and for tuning). They answer
+      // the two questions a live transcript can fail at: how far behind the
+      // words are, and how long the page is frozen while it tries to catch up.
+      const captureMetrics = emptyCaptureMetrics();
+      let perfObservers = [];
+
+      function emptyCaptureMetrics() {
+        return {
+          captureStarted: 0,
+          posts: 0,
+          ingests: 0,
+          ingestLagMaxMs: 0,
+          ingestLagSumMs: 0,
+          resampleMs: 0,
+          addAudioMs: 0,
+          transcribeMs: 0,
+          transcribeMaxMs: 0,
+          transcribePasses: 0,
+          meetingPassMs: 0,
+          meetingPassMaxMs: 0,
+          meetingPasses: 0,
+          youPassMs: 0,
+          youPassMaxMs: 0,
+          youPasses: 0,
+          mixAtMs: 0,
+          renderMs: 0,
+          renderMaxMs: 0,
+          renders: 0,
+          pendingFramesMax: 0,
+          firstProvisionalMs: 0,
+          firstLineMs: 0,
+          transcriptLagMaxS: 0,
+          meetingLagMaxS: 0,
+          youLagMaxS: 0,
+          meetingLagNowS: 0,
+          youLagNowS: 0,
+          longTasks: 0,
+          longTaskMaxMs: 0,
+          longTaskSumMs: 0,
+          rafFrames: 0,
+          rafGapMaxMs: 0,
+          // How far the transcript trails the recording clock, sampled while
+          // capturing. Each point is { tS, recordedS, meetingLagS, youLagS,
+          // pendingS, workerQueuedS }. Capped; resolution drops if a session
+          // runs longer than a couple of minutes.
+          lagSamples: [],
+        };
+      }
+
+      const coveredEnd = { meeting: 0, you: 0 };
+      const LAG_SAMPLE_MS = 250;
+      const LAG_SAMPLES_MAX = 480;
+
+      function resetCaptureMetrics() {
+        Object.assign(captureMetrics, emptyCaptureMetrics());
+        coveredEnd.meeting = 0;
+        coveredEnd.you = 0;
+      }
+
+      function noteRender(ms) {
+        captureMetrics.renders += 1;
+        captureMetrics.renderMs += ms;
+        if (ms > captureMetrics.renderMaxMs) captureMetrics.renderMaxMs = ms;
+      }
+
+      function noteCovered(source, endTime) {
+        if (!Number.isFinite(endTime) || endTime < 0) return;
+        if (endTime > coveredEnd[source]) coveredEnd[source] = endTime;
+      }
+
+      function lagFor(source) {
+        return Math.max(0, seconds(recording.length) - coveredEnd[source]);
+      }
+
+      function sampleLag() {
+        if (!captureMetrics.captureStarted) return;
+        const recordedS = seconds(recording.length);
+        const meetingLagS = lagFor('meeting');
+        const youLagS = lagFor('you');
+        captureMetrics.meetingLagNowS = meetingLagS;
+        captureMetrics.youLagNowS = youLagS;
+        if (meetingLagS > captureMetrics.meetingLagMaxS) {
+          captureMetrics.meetingLagMaxS = meetingLagS;
+        }
+        if (youLagS > captureMetrics.youLagMaxS) {
+          captureMetrics.youLagMaxS = youLagS;
+        }
+        const transcriptLagS = Math.max(meetingLagS, youLagS);
+        if (transcriptLagS > captureMetrics.transcriptLagMaxS) {
+          captureMetrics.transcriptLagMaxS = transcriptLagS;
+        }
+        const samples = captureMetrics.lagSamples;
+        if (samples.length >= LAG_SAMPLES_MAX) {
+          captureMetrics.lagSamples = samples.filter((_, i) => i % 2 === 0);
+        }
+        captureMetrics.lagSamples.push({
+          tS: (performance.now() - captureMetrics.captureStarted) / 1000,
+          recordedS,
+          meetingLagS,
+          youLagS,
+          pendingS: pendingAudioSeconds(),
+          workerQueuedS: workerQueuedSeconds(),
+        });
+      }
+
+      function noteTranscriptUpdate(source, kind, endTime) {
+        const now = performance.now();
+        const started = captureMetrics.captureStarted;
+        if (!started) return;
+        if (kind === 'provisional' && !captureMetrics.firstProvisionalMs) {
+          captureMetrics.firstProvisionalMs = now - started;
+        }
+        if (kind === 'line' && !captureMetrics.firstLineMs) {
+          captureMetrics.firstLineMs = now - started;
+        }
+        noteCovered(source, endTime);
+        const lag = lagFor(source);
+        if (lag > captureMetrics.transcriptLagMaxS) captureMetrics.transcriptLagMaxS = lag;
+        if (source === 'meeting' && lag > captureMetrics.meetingLagMaxS) {
+          captureMetrics.meetingLagMaxS = lag;
+        }
+        if (source === 'you' && lag > captureMetrics.youLagMaxS) {
+          captureMetrics.youLagMaxS = lag;
+        }
+      }
+
+      function pendingAudioSeconds() {
+        const rate = audioContext?.sampleRate || RATE;
+        let frames = 0;
+        for (const tapped of transcribers) frames += tapped.pendingFrames?.() ?? 0;
+        return frames / rate;
+      }
+
+      function workerQueuedSeconds() {
+        let seconds = 0;
+        for (const tapped of transcribers) seconds += tapped.queuedSeconds?.() ?? 0;
+        return seconds;
+      }
+
+      function snapshotCaptureMetrics() {
+        if (captureMetrics.captureStarted) {
+          captureMetrics.meetingLagNowS = lagFor('meeting');
+          captureMetrics.youLagNowS = lagFor('you');
+        }
+        return {
+          ...captureMetrics,
+          pendingAudioSeconds: pendingAudioSeconds(),
+          workerQueuedSeconds: workerQueuedSeconds(),
+          recordedSeconds: seconds(recording.length),
+          usingWorker: Boolean(sttHost),
+          speakers: els.optSpeakers.checked,
+        };
+      }
+
+      function startPerfObservers() {
+        stopPerfObservers();
+        resetCaptureMetrics();
+        captureMetrics.captureStarted = performance.now();
+        if (typeof PerformanceObserver === 'function') {
+          try {
+            const long = new PerformanceObserver((list) => {
+              for (const entry of list.getEntries()) {
+                captureMetrics.longTasks += 1;
+                captureMetrics.longTaskSumMs += entry.duration;
+                if (entry.duration > captureMetrics.longTaskMaxMs) {
+                  captureMetrics.longTaskMaxMs = entry.duration;
+                }
+              }
+            });
+            long.observe({ type: 'longtask', buffered: false });
+            perfObservers.push(long);
+          } catch {
+            // `longtask` is Chromium-only; the rAF gap still covers freezes.
+          }
+        }
+        let lastRaf = performance.now();
+        let lastLagSample = 0;
+        let rafId = 0;
+        const tick = (now) => {
+          const gap = now - lastRaf;
+          lastRaf = now;
+          captureMetrics.rafFrames += 1;
+          if (gap > captureMetrics.rafGapMaxMs) captureMetrics.rafGapMaxMs = gap;
+          if (now - lastLagSample >= LAG_SAMPLE_MS) {
+            lastLagSample = now;
+            sampleLag();
+          }
+          rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+        perfObservers.push({ disconnect() { cancelAnimationFrame(rafId); } });
+      }
+
+      function stopPerfObservers() {
+        for (const observer of perfObservers) observer.disconnect();
+        perfObservers = [];
+      }
+
+      // `setTimeout(0)` is the wrong yield for a live transcript. In a
+      // background tab Chrome stretches it to a second, so the pump falls
+      // behind while the worklet keeps capturing; in the foreground it often
+      // runs again before the browser has painted, so two streams taking turns
+      // still look like one long freeze. A MessageChannel hop is a real task
+      // turn that is not throttled; a frame (with a short timer fallback) is
+      // what actually lets the page paint and take input.
+      const yieldTurn = (() => {
+        const { port1, port2 } = new MessageChannel();
+        port1.start();
+        return () =>
+          new Promise((resolve) => {
+            port1.addEventListener('message', () => resolve(), { once: true });
+            port2.postMessage(null);
+          });
+      })();
+
+      function yieldToUi() {
+        if (document.hidden) return yieldTurn();
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          // A paint is what we want; a timer is what we will not hang without.
+          // Headless and occluded tabs can skip animation frames entirely.
+          requestAnimationFrame(finish);
+          setTimeout(finish, 32);
+        });
+      }
 
       /**
        * A linear resampler that keeps its place between calls.
@@ -1369,8 +2193,13 @@
        * chunk would drop a fraction of a sample every time. Over an hour that is
        * a drift of seconds, which is exactly the sort of error that makes a
        * highlight sit on the wrong sentence.
+       *
+       * Prefer not to land here: the capture AudioContext is opened at 16 kHz
+       * so the browser's own resampler does this job. This path is for browsers
+       * that ignore that hint.
        */
       function makeResampler(inputRate) {
+        if (!inputRate || inputRate === RATE) return (chunk) => chunk;
         const ratio = inputRate / RATE;
         let position = 0;
         let pending = new Float32Array(0);
@@ -1378,56 +2207,169 @@
           const buffer = new Float32Array(pending.length + chunk.length);
           buffer.set(pending);
           buffer.set(chunk, pending.length);
-          const out = [];
+          const out = new Float32Array(Math.ceil(buffer.length / ratio) + 2);
+          let written = 0;
           while (position + 1 < buffer.length) {
             const index = Math.floor(position);
             const fraction = position - index;
-            out.push(buffer[index] + (buffer[index + 1] - buffer[index]) * fraction);
+            out[written++] = buffer[index] + (buffer[index + 1] - buffer[index]) * fraction;
             position += ratio;
           }
-          const consumed = Math.floor(position);
+          // Downsampling can advance `position` past the end of this buffer.
+          // Consume only what we have and keep the overflow as the phase into
+          // the next chunk; using floor(position) as the consume count skips
+          // (or duplicates) a sample at every flush, which is a click.
+          const consumed = Math.min(Math.floor(position), buffer.length);
           pending = buffer.slice(consumed);
           position -= consumed;
-          return Float32Array.from(out);
+          return out.subarray(0, written);
         };
       }
 
+      // An AudioWorklet runs even when the tab is in the background, but the main
+      // thread that receives its posts does not. Posting every render quantum
+      // (~128 frames, hundreds of times a second, on two streams) therefore
+      // builds a queue the moment anyone looks away, and draining that queue is
+      // what leaves the page black for seconds when they look back. Batching
+      // here cuts the posts by an order of magnitude; the main-thread pump in
+      // `tap` coalesces whatever still arrives and yields between bites so the
+      // page can paint while it catches up.
+      //
+      // Empty inputs are recorded as silence, not skipped. Tab capture in
+      // particular sometimes hands the worklet a quantum with no channels;
+      // dropping those frames concatenates across a hole and is a click.
+      // Skipped callbacks (Chrome not pulling a silent graph, a backgrounded
+      // tab) are the same hole at a larger scale: the next quantum would splice
+      // onto the last and the recording would play back fast. `currentFrame`
+      // says how many frames the renderer advanced without us, so those land
+      // as zeros instead.
       const CAPTURE_WORKLET = `
 class MoonshineCapture extends AudioWorkletProcessor {
-  process(inputs) {
-    const input = inputs[0];
-    if (input && input.length && input[0]) {
-      const frames = input[0].length;
-      const mixed = new Float32Array(frames);
-      for (const channel of input) {
-        for (let i = 0; i < frames; i++) mixed[i] += channel[i];
+  constructor() {
+    super();
+    this._chunks = [];
+    this._frames = 0;
+    this._nextFrame = null;
+    this._target = Math.max(128, Math.round(sampleRate * 0.1));
+    this.port.onmessage = () => this._flush();
+  }
+  process(inputs, outputs) {
+    const frames = outputs[0]?.[0]?.length || 128;
+    if (this._nextFrame != null) {
+      const missing = currentFrame - this._nextFrame;
+      if (missing > 0) {
+        this._chunks.push(new Float32Array(missing));
+        this._frames += missing;
       }
-      for (let i = 0; i < frames; i++) mixed[i] /= input.length;
-      this.port.postMessage(mixed);
     }
+    this._nextFrame = currentFrame + frames;
+    // A silent output can be skipped by the renderer, which is how callbacks
+    // go missing. Keep a tick on the wire; it is well below audible.
+    for (const channel of outputs[0] || []) {
+      if (!channel) continue;
+      channel.fill(0);
+      channel[0] = 1e-8;
+    }
+    const mixed = new Float32Array(frames);
+    const input = inputs[0];
+    const channels = input && input.length && input[0] && input[0].length ? input : null;
+    if (channels) {
+      const n = Math.min(frames, channels[0].length);
+      for (const channel of channels) {
+        if (!channel) continue;
+        for (let i = 0; i < n; i++) mixed[i] += channel[i];
+      }
+      const count = channels.length || 1;
+      for (let i = 0; i < n; i++) mixed[i] /= count;
+    }
+    this._chunks.push(mixed);
+    this._frames += frames;
+    if (this._frames >= this._target) this._flush();
     return true;
+  }
+  _flush() {
+    if (!this._frames) return;
+    const out = new Float32Array(this._frames);
+    let offset = 0;
+    for (const chunk of this._chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    this._chunks = [];
+    this._frames = 0;
+    this.port.postMessage(out, [out.buffer]);
   }
 }
 registerProcessor('moonshine-capture', MoonshineCapture);
 `;
 
+      function noteTranscribe(streamId, transcribeMs) {
+        captureMetrics.transcribeMs += transcribeMs;
+        if (transcribeMs > captureMetrics.transcribeMaxMs) {
+          captureMetrics.transcribeMaxMs = transcribeMs;
+        }
+        if (transcribeMs > 8) captureMetrics.transcribePasses += 1;
+        const meeting = streamId === 'meeting';
+        if (meeting) {
+          captureMetrics.meetingPassMs += transcribeMs;
+          captureMetrics.meetingPasses += 1;
+          if (transcribeMs > captureMetrics.meetingPassMaxMs) {
+            captureMetrics.meetingPassMaxMs = transcribeMs;
+          }
+        } else {
+          captureMetrics.youPassMs += transcribeMs;
+          captureMetrics.youPasses += 1;
+          if (transcribeMs > captureMetrics.youPassMaxMs) {
+            captureMetrics.youPassMaxMs = transcribeMs;
+          }
+        }
+      }
+
       /**
        * Wires one MediaStream into one Moonshine stream and into the recording.
        *
-       * Both sources share this AudioContext, and each one's Moonshine stream is
-       * started at the same moment as the recording, which is what lets a line's
+       * Capture stays on this thread (resample, mix, paint). Inference runs in
+       * the STT worker, so a multi-second diarization pass does not freeze the
+       * page. Both sources share this AudioContext, and each stream is started
+       * at the same moment as the recording, which is what lets a line's
        * `startTime` be read straight off as an offset into the recording.
        */
-      async function tap({ source, mediaStream, transcriber, onLine }) {
+      async function tap({ source, mediaStream, transcriberId, onLine }) {
         const node = audioContext.createMediaStreamSource(mediaStream);
-        const worklet = new AudioWorkletNode(audioContext, 'moonshine-capture');
+        const worklet = new AudioWorkletNode(audioContext, 'moonshine-capture', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          channelCount: 1,
+          channelCountMode: 'explicit',
+          channelInterpretation: 'speakers',
+        });
         const resample = makeResampler(audioContext.sampleRate);
-        const stream = transcriber.createStream();
+        const streamId = source;
         const base = recording.sessionStart;
         cursors.set(source, base);
+        // Half a second of capture-rate audio per turn: enough to feed one
+        // transcription interval, small enough that a backlog cannot grow a
+        // pass that takes longer than the audio it covers.
+        const maxFrames = Math.round(audioContext.sampleRate * 0.5);
+        const pending = [];
+        const postedAt = [];
+        let pumping = false;
+        let closed = false;
+        /** Bumped to cancel an in-flight pump when capture stops. */
+        let epoch = 0;
 
-        stream.addListener({
-          onLineTextChanged: (event) => showProvisional(source, event.line.text),
+        await sttHost.createStream(transcriberId, streamId, {
+          // Meeting lines are the echo reference; transcribe them before the
+          // microphone when both are due so a duplicate can be dropped.
+          priority: source === 'meeting' ? 1 : 0,
+        });
+        sttHost.setListener(streamId, {
+          onLineTextChanged: (event) => {
+            const line = event.line;
+            const end = seconds(base) + line.startTime + line.duration;
+            showProvisional(source, line.text, end);
+          },
           onLineCompleted: (event) => {
             discardProvisional(source);
             onLine(event.line);
@@ -1440,25 +2382,151 @@ registerProcessor('moonshine-capture', MoonshineCapture);
             reassignSpeaker(lineId(source, event.line), speakerOf(source, event.line)),
           onError: (event) => fail(event.error),
         });
-        stream.start();
+        await sttHost.start(streamId);
+
+        function pendingFrames() {
+          let frames = 0;
+          for (const part of pending) frames += part.length;
+          return frames;
+        }
+
+        function take(max) {
+          const parts = [];
+          let frames = 0;
+          let oldest = postedAt[0];
+          while (pending.length && frames < max) {
+            const next = pending[0];
+            if (parts.length && frames + next.length > max) break;
+            parts.push(pending.shift());
+            oldest = Math.min(oldest, postedAt.shift());
+            frames += next.length;
+          }
+          return { parts, frames, oldest };
+        }
+
+        function ingest(parts, { transcribe = true } = {}) {
+          if (!parts.length) return;
+          captureMetrics.ingests += 1;
+          let frames = 0;
+          for (const part of parts) frames += part.length;
+          let t = performance.now();
+          const merged = parts.length === 1 ? parts[0] : new Float32Array(frames);
+          if (parts.length > 1) {
+            let offset = 0;
+            for (const part of parts) {
+              merged.set(part, offset);
+              offset += part.length;
+            }
+          }
+          const chunk = resample(merged);
+          captureMetrics.resampleMs += performance.now() - t;
+          if (!chunk.length) return;
+          if (els.optAudio.checked) {
+            t = performance.now();
+            const at = cursors.get(source);
+            cursors.set(source, at + chunk.length);
+            if (source === 'you') {
+              micHold.push({ at, chunk });
+              flushMicHold();
+            } else {
+              recording.mixAt(at, chunk);
+              flushMicHold();
+            }
+            captureMetrics.mixAtMs += performance.now() - t;
+          }
+          t = performance.now();
+          sttHost.addAudio(streamId, chunk, RATE, { transcribe });
+          captureMetrics.addAudioMs += performance.now() - t;
+        }
 
         worklet.port.onmessage = (event) => {
-          const chunk = resample(event.data);
-          if (!chunk.length) return;
-          stream.addAudio(chunk, RATE);
-          stream.transcribe();
-          if (els.optAudio.checked) {
-            const at = cursors.get(source);
-            recording.mixAt(at, chunk);
-            cursors.set(source, at + chunk.length);
+          if (closed || !(event.data instanceof Float32Array)) return;
+          pending.push(event.data);
+          postedAt.push(performance.now());
+          captureMetrics.posts += 1;
+          const queued = pendingFrames();
+          if (queued > captureMetrics.pendingFramesMax) {
+            captureMetrics.pendingFramesMax = queued;
           }
+          if (!pumping) void pump();
         };
+
+        async function pump() {
+          const mine = epoch;
+          pumping = true;
+          try {
+            await yieldTurn();
+            while (pending.length && mine === epoch) {
+              const queued = pendingFrames();
+              if (queued > maxFrames) await yieldToUi();
+              if (mine !== epoch || !pending.length) break;
+              const { parts, oldest } = take(maxFrames);
+              const lag = performance.now() - oldest;
+              captureMetrics.ingestLagSumMs += lag;
+              if (lag > captureMetrics.ingestLagMaxMs) captureMetrics.ingestLagMaxMs = lag;
+              ingest(parts);
+            }
+          } finally {
+            if (mine === epoch) {
+              pumping = false;
+              if (pending.length) void pump();
+            }
+          }
+        }
+
+        /**
+         * Stops the tap: cancels the async pump, flushes any audio still held
+         * in the worklet, and ingests the queue so stopping cannot hang on a
+         * backlog.
+         */
+        function stop() {
+          closed = true;
+          epoch += 1;
+          pumping = false;
+          worklet.port.onmessage = (event) => {
+            if (event.data instanceof Float32Array) {
+              pending.push(event.data);
+              postedAt.push(performance.now());
+            }
+          };
+          try {
+            worklet.port.postMessage('flush');
+          } catch {
+            // Port may already be gone if the context was closed elsewhere.
+          }
+        }
+
+        async function finish() {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (pending.length) {
+            postedAt.splice(0);
+            ingest(pending.splice(0), { transcribe: false });
+          }
+          worklet.port.onmessage = null;
+          try {
+            node.disconnect();
+            worklet.disconnect();
+          } catch {
+            // Already gone if capture failed mid-session.
+          }
+          await sttHost.stop(streamId);
+          await sttHost.closeStream(streamId);
+        }
 
         node.connect(worklet);
         // Keeps the graph pulling without putting the meeting back through the
         // speakers, which would be an echo we created ourselves.
         worklet.connect(audioContext.destination);
-        return { node, worklet, stream, base };
+        return {
+          node,
+          worklet,
+          streamId,
+          base,
+          stop,
+          finish,
+          pendingFrames,
+          queuedSeconds: () => sttHost.queuedSeconds(streamId),
+        };
       }
 
       /**
@@ -1474,6 +2542,7 @@ registerProcessor('moonshine-capture', MoonshineCapture);
        * noise; and a line can be split between speakers, of which this takes the
        * first, because a turn is a block and cannot be two people at once.
        */
+
       function speakerOf(source, line) {
         if (source !== 'meeting') return null;
         const spans = line.speakerSpans ?? [];
@@ -1500,7 +2569,8 @@ registerProcessor('moonshine-capture', MoonshineCapture);
         els.ring.classList.add('is-indeterminate');
         setState('loading');
         try {
-          const [micModel, meetingModel] = await ready;
+          const host = await ready;
+          if (!host) throw new Error('Speech models failed to load.');
 
           displayStream = fakeScreen
             ? await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -1518,6 +2588,8 @@ registerProcessor('moonshine-capture', MoonshineCapture);
                   echoCancellation: false,
                   noiseSuppression: false,
                   autoGainControl: false,
+                  sampleRate: RATE,
+                  channelCount: 1,
                 },
                 systemAudio: 'include',
                 surfaceSwitching: 'include',
@@ -1535,16 +2607,26 @@ registerProcessor('moonshine-capture', MoonshineCapture);
             );
           }
 
-          micStream = await navigator.mediaDevices
-            .getUserMedia({ audio: await audioConstraints() })
-            .catch(() => null);
+          micStream = noMics
+            ? null
+            : await navigator.mediaDevices
+                .getUserMedia({ audio: await audioConstraints() })
+                .catch(() => null);
 
           // A share ends when the user presses Chrome's own "Stop sharing".
           displayStream.getVideoTracks()[0]?.addEventListener('ended', () => {
             void stopCapture();
           });
 
-          audioContext = new AudioContext();
+          // Open at the model's rate so the browser resamples tab/mic audio
+          // with its own converter. Linear interpolation of 48 kHz down to
+          // 16 kHz is what the clicks on transients were; a 44.1 kHz context
+          // reading a 48 kHz share is a slow speed error on top.
+          try {
+            audioContext = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
+          } catch {
+            audioContext = new AudioContext({ latencyHint: 'interactive' });
+          }
           if (audioContext.state === 'suspended') await audioContext.resume();
           const workletUrl = URL.createObjectURL(
             new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }),
@@ -1557,13 +2639,14 @@ registerProcessor('moonshine-capture', MoonshineCapture);
 
           // Everything that follows is measured from here.
           recording.sessionStart = recording.length;
+          startPerfObservers();
 
           transcribers = [];
           transcribers.push(
             await tap({
               source: 'meeting',
               mediaStream: new MediaStream(displayStream.getAudioTracks()),
-              transcriber: meetingModel,
+              transcriberId: 'meeting',
               onLine: (line) => appendLine(toLine(line, 'meeting', recording.sessionStart)),
             }),
           );
@@ -1574,7 +2657,7 @@ registerProcessor('moonshine-capture', MoonshineCapture);
               await tap({
                 source: 'you',
                 mediaStream: micStream,
-                transcriber: micModel,
+                transcriberId: 'mic',
                 onLine: (line) => holdMicLine(toLine(line, 'you', recording.sessionStart)),
               }),
             );
@@ -1593,19 +2676,23 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       }
 
       async function stopCapture() {
+        sampleLag();
+        stopPerfObservers();
         for (const source of provisional.keys()) discardProvisional(source);
 
-        for (const tapped of transcribers) {
-          tapped.worklet.port.onmessage = null;
-          tapped.worklet.disconnect();
-          tapped.node.disconnect();
-          // Stopping flushes whatever was still being spoken, so this arrives
-          // as one more completed line and lands on the page like the rest.
-          tapped.stream.stop();
-          tapped.stream.close();
-        }
+        for (const tapped of transcribers) tapped.stop();
+        // One task turn so each worklet's flush post can land, then ingest and
+        // stop the recognizer streams. A timer, not a MessageChannel: the
+        // capture pump may already be waiting on that channel, and parking
+        // stop behind the same hop can deadlock.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        for (const tapped of transcribers) await tapped.finish();
+        flushMicHold({ force: true });
+        dropHeldMicEchoes();
+        if (dropCommittedMicEchoes()) regroupTurns();
         transcribers = [];
         cursors.clear();
+        micHold.length = 0;
 
         // Only now, once that last line is in: a later session opens a fresh
         // turn, so its first line is labelled even if the same person carries
@@ -1639,18 +2726,22 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       // Where play begins is a question the reader has usually already answered
       // by pointing at something. Selecting text asks for that text; putting the
       // caret in a sentence asks to hear the meeting from there, whether or not
-      // anything is selected; leaving the caret at the end of the document asks
-      // for the whole thing, since there is nothing after it to play. Only when
-      // the caret has not been touched since playback stopped does the
+      // anything is selected; leaving the caret at the end of the document, or
+      // never having placed one, asks for the whole recording from 0:00. Only
+      // when the caret has not been touched since playback stopped does the
       // remembered position win, which is what makes pause and play behave the
       // way pause and play should. The clock says which of these is about to
-      // happen before anything is pressed.
+      // happen before anything is pressed, and its duration is the recording
+      // as it stands, including audio that has arrived since capture started.
 
       const player = new Audio();
       let builtLength = -1;
       let playRange = null;
+      /** True when this playback is the whole recording, so its end can grow. */
+      let playToEnd = false;
       let pausedAt = null;
       let highlighted = [];
+      let clockFrame = 0;
 
       /**
        * Whether the caret has been placed since playback last stopped.
@@ -1661,30 +2752,38 @@ registerProcessor('moonshine-capture', MoonshineCapture);
        */
       let caretMoved = false;
 
-      /** The line ids the selection covers, in document order. */
-      function selectedLineIds() {
+      /**
+       * The stretch of recording play would cover, given the caret or selection.
+       *
+       * A caret in a line, or a selection of lines, is that stretch of audio.
+       * No caret in the document, or one parked at the very end, is the whole
+       * recording from 0:00 — the same as a media player's default playhead.
+       */
+      function playbackRange() {
+        const total = seconds(recording.length);
         const spans = [...els.doc.querySelectorAll('.ln')];
-        if (!spans.length) return [];
-        const everything = () => spans.map((span) => span.dataset.line);
+        if (!spans.length) return { start: 0, end: total };
 
         const selection = getSelection();
-        if (!selection?.rangeCount) return everything();
+        if (!selection?.rangeCount) return { start: 0, end: total };
         const range = selection.getRangeAt(0);
-        if (!els.doc.contains(range.commonAncestorContainer)) return everything();
+        if (!els.doc.contains(range.commonAncestorContainer)) return { start: 0, end: total };
 
         if (range.collapsed) {
-          // A caret rather than a selection means "from here on", except at the
-          // very end of the document, where it can only mean "all of it".
-          if (caretAtEnd(range, spans)) return everything();
+          if (caretAtEnd(range, spans)) return { start: 0, end: total };
           const after = spans.filter(
             (span) =>
               range.compareBoundaryPoints(Range.END_TO_START, spanRange(span)) <= 0,
           );
-          return after.length ? after.map((span) => span.dataset.line) : everything();
+          return rangeFor(
+            (after.length ? after : spans).map((span) => span.dataset.line),
+          );
         }
-        return spans
-          .filter((span) => range.intersectsNode(span))
-          .map((span) => span.dataset.line);
+        return rangeFor(
+          spans
+            .filter((span) => range.intersectsNode(span))
+            .map((span) => span.dataset.line),
+        );
       }
 
       /**
@@ -1750,7 +2849,9 @@ registerProcessor('moonshine-capture', MoonshineCapture);
         header.setUint16(34, 16, true);
         ascii(36, 'data');
         header.setUint32(40, samples.length * 2, true);
-        return new Blob([header, samples], { type: 'audio/wav' });
+        const pcm = new Int16Array(samples.length);
+        for (let i = 0; i < samples.length; i++) pcm[i] = floatToInt16(samples[i]);
+        return new Blob([header, pcm], { type: 'audio/wav' });
       }
 
       /**
@@ -1770,7 +2871,8 @@ registerProcessor('moonshine-capture', MoonshineCapture);
         if (!recording.length) return;
         refreshPlayer();
 
-        playRange = rangeFor(selectedLineIds());
+        playRange = playbackRange();
+        playToEnd = playRange.start === 0 && playRange.end >= seconds(recording.length) - 1e-3;
         player.currentTime = plannedStart(playRange);
         // Answered: from here on it is a pause to carry on from, not a caret to
         // start at, until the reader points somewhere else.
@@ -1800,6 +2902,7 @@ registerProcessor('moonshine-capture', MoonshineCapture);
        */
       function followPlayhead() {
         if (player.paused) return;
+        if (playToEnd && playRange) playRange.end = seconds(recording.length);
         const at = player.currentTime;
         if (playRange && at >= playRange.end) {
           pausePlayback();
@@ -1839,13 +2942,27 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       /**
        * The playhead while it is moving, and where play would begin while it is
        * not, so that moving the caret answers "and where would that start?"
-       * without anything having to be pressed.
+       * without anything having to be pressed. The duration is the recording
+       * so far, and is refreshed as audio arrives, not only when capture stops.
        */
       function updateClock() {
-        const at = player.paused
-          ? plannedStart(rangeFor(selectedLineIds()))
-          : player.currentTime;
-        els.clock.textContent = clockText(at, seconds(recording.length));
+        const total = seconds(recording.length);
+        const at = player.paused ? plannedStart(playbackRange()) : player.currentTime;
+        const text = clockText(at, total);
+        if (els.clock.textContent !== text) els.clock.textContent = text;
+        const haveAudio = recording.length > 0;
+        if (els.play.disabled === haveAudio) {
+          els.play.disabled = !haveAudio;
+          els.wav.disabled = !haveAudio;
+        }
+      }
+
+      function scheduleClock() {
+        if (clockFrame) return;
+        clockFrame = requestAnimationFrame(() => {
+          clockFrame = 0;
+          updateClock();
+        });
       }
 
       els.play.addEventListener('click', () => {
@@ -1865,10 +2982,19 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       // for the play button is not the reader changing their mind about where
       // to start, and treating it as one would make resuming impossible.
       document.addEventListener('selectionchange', () => {
-        // A heading left alone mid-rename is relabelled once the caret is out
-        // of it, which is the next time the selection moves at all — including
-        // the move away from the document that this listener otherwise ignores.
-        if (regroupDeferred) {
+        // Two things wait for the caret to leave a heading, and the next move
+        // of the selection is when both happen — including the move away from
+        // the document that this listener otherwise ignores.
+        //
+        // A heading left alone mid-rename is relabelled. And a rename is
+        // finished, so a name that now matches the turn above or below it can
+        // be laid out as one turn with it: doing that as the reader types
+        // would act on every half-finished name on the way to the one they
+        // meant, and joining two speakers is not something to do on the way
+        // past.
+        const renamed = renaming !== null && editedHeading() !== renaming;
+        if (renamed) renaming = null;
+        if (regroupDeferred || renamed) {
           regroupDeferred = false;
           regroupTurns();
         }
@@ -1917,6 +3043,32 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       });
 
       // --- Taking the notes with you ---------------------------------------------
+      // Nothing here is uploaded, which is the point of the page and also the
+      // one thing about it that can lose an afternoon's work: the notes exist
+      // in this tab and in no other place, there is no server to have
+      // autosaved them to, and closing the tab is the same gesture as closing
+      // a meeting that has just finished. So the page asks first, but only
+      // when there is something to lose: anything that changes the document
+      // arms the question, and anything that takes a copy of it away puts it
+      // back to rest. Saving the audio is not one of those things -- the
+      // recording is not the notes.
+
+      let exported = true;
+
+      function markChanged() {
+        exported = false;
+      }
+
+      function markExported() {
+        exported = true;
+      }
+
+      window.addEventListener('beforeunload', (event) => {
+        if (exported || isEmpty()) return;
+        event.preventDefault();
+        // Browsers older than the ones for which preventDefault is enough.
+        event.returnValue = true;
+      });
 
       const paragraphs = () =>
         readDocument(els.doc, { skip: (el) => el.classList.contains('prov') });
@@ -1938,6 +3090,7 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       els.copy.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(toPlainText(paragraphs()));
+          markExported();
           const original = els.copy.textContent;
           els.copy.textContent = 'Copied';
           setTimeout(() => (els.copy.textContent = original), 1400);
@@ -1955,9 +3108,13 @@ registerProcessor('moonshine-capture', MoonshineCapture);
           new Blob([toMarkdown(paragraphs())], { type: 'text/markdown;charset=utf-8' }),
           filename('md'),
         );
+        markExported();
       });
 
-      els.word.addEventListener('click', () => save(toDocx(paragraphs()), filename('docx')));
+      els.word.addEventListener('click', () => {
+        save(toDocx(paragraphs()), filename('docx'));
+        markExported();
+      });
 
       els.wav.addEventListener('click', () => save(wavBlob(), filename('wav')));
 
@@ -1989,6 +3146,7 @@ registerProcessor('moonshine-capture', MoonshineCapture);
           out.push(`${index++}\n${stamp(start)} --> ${stamp(end)}\n${text}\n`);
         }
         save(new Blob([out.join('\n')], { type: 'text/plain;charset=utf-8' }), filename('srt'));
+        markExported();
       });
 
       // --- Typed lines -------------------------------------------------------------
@@ -2024,7 +3182,10 @@ registerProcessor('moonshine-capture', MoonshineCapture);
       }
 
       function localStreamingUrls({ speakers }) {
-        const base = '/test-assets/tiny-streaming-en';
+        const useMedium = params.get('arch') === 'medium';
+        const base = useMedium
+          ? '/test-assets/medium-streaming-en'
+          : '/test-assets/tiny-streaming-en';
         const names = [
           'frontend.ort',
           'encoder.ort',
@@ -2049,9 +3210,10 @@ registerProcessor('moonshine-capture', MoonshineCapture);
        * different problems. The meeting has an unknown number of people in it
        * and is worth the diarization models; the microphone has exactly one
        * person in front of it, so asking who is talking would be spending 8.2 MB
-       * to be told what we already know.
+       * to be told what we already know. Both live in the STT worker so a
+       * diarization pass cannot freeze the page.
        */
-      function loadTranscriber({ speakers }) {
+      function loadTranscriber({ id, speakers }) {
         // Looking at the audio every two seconds instead of every one is the
         // difference between keeping up with a meeting in a browser and falling
         // behind it. The segmentation and embedding models are over half the
@@ -2061,23 +3223,35 @@ registerProcessor('moonshine-capture', MoonshineCapture);
         // between one recording and the next, so what it really costs is a
         // slightly coarser idea of exactly when one person stopped and the next
         // started.
-        const options = speakers
-          ? { identify_speakers: 'true', diarization_analyze_cadence: '2.0' }
-          : undefined;
-        const progress = (loaded, total, file) =>
-          onProgress(total ? loaded / total : 0, file, { loaded, total });
+        const options = {
+          decode_incomplete_lines:
+            params.get('decode') === 'live' ? 'true' : 'false',
+          ...(speakers
+            ? { identify_speakers: 'true', diarization_analyze_cadence: '2.0' }
+            : {}),
+        };
         if (useLocalAssets) {
-          return Transcriber.loadFromUrls(localStreamingUrls({ speakers }), {
-            modelArch: ModelArch.TinyStreaming,
-            onProgress: progress,
+          const files = Object.fromEntries(
+            Object.entries(localStreamingUrls({ speakers })).map(([name, path]) => [
+              name,
+              new URL(path, location.href).href,
+            ]),
+          );
+          return sttHost.loadTranscriber({
+            transcriberId: id,
+            modelArch:
+              params.get('arch') === 'medium'
+                ? ModelArch.MediumStreaming
+                : ModelArch.TinyStreaming,
             options,
+            source: { kind: 'urls', files },
           });
         }
-        return Transcriber.load({
-          language: 'en',
+        return sttHost.loadTranscriber({
+          transcriberId: id,
           modelArch: ModelArch.MediumStreaming,
-          onProgress: progress,
           options,
+          source: { kind: 'catalog', language: 'en' },
         });
       }
 
@@ -2090,26 +3264,34 @@ registerProcessor('moonshine-capture', MoonshineCapture);
        * but it is not worth a transcript, so the fallback is quiet and the page
        * says so once.
        */
-      async function buildTranscriber({ speakers }) {
+      async function buildTranscriber({ id, speakers }) {
         try {
-          return await loadTranscriber({ speakers });
+          await loadTranscriber({ id, speakers });
         } catch (err) {
           if (!speakers) throw err;
           speakersUnavailable = true;
-          return loadTranscriber({ speakers: false });
+          await loadTranscriber({ id, speakers: false });
         }
       }
 
       let speakersUnavailable = false;
-
       let ready = null;
 
       function warmStart() {
         ready = (async () => {
           try {
-            const models = await Promise.all([
-              buildTranscriber({ speakers: false }),
-              buildTranscriber({ speakers: els.optSpeakers.checked }),
+            if (!sttWorkerSupported()) {
+              throw new Error(
+                'Meeting Notes needs a browser that can run a Web Worker, so inference can stay off the page.',
+              );
+            }
+            sttHost = new SttWorkerHost();
+            sttHost.onProgress = (_id, loaded, total, file) =>
+              onProgress(total ? loaded / total : 0, file, { loaded, total });
+            sttHost.onPass = (streamId, ms) => noteTranscribe(streamId, ms);
+            await Promise.all([
+              buildTranscriber({ id: 'mic', speakers: false }),
+              buildTranscriber({ id: 'meeting', speakers: els.optSpeakers.checked }),
             ]);
             setState('ready');
             if (speakersUnavailable) {
@@ -2119,11 +3301,11 @@ registerProcessor('moonshine-capture', MoonshineCapture);
                 'Telling speakers apart is unavailable: the diarization models ' +
                 'could not be downloaded.';
             }
-            return models;
+            return sttHost;
           } catch (err) {
             setState('ready');
             fail(err);
-            return [];
+            return null;
           }
         })();
         return ready;
@@ -2182,7 +3364,7 @@ registerProcessor('moonshine-capture', MoonshineCapture);
         text: () => toPlainText(paragraphs()),
         recordedSeconds: () => seconds(recording.length),
         playhead: () => player.currentTime,
-        plannedStart: () => plannedStart(rangeFor(selectedLineIds())),
+        plannedStart: () => plannedStart(playbackRange()),
         speakerNames,
         appendLine,
         reassignSpeaker,
@@ -2193,6 +3375,10 @@ registerProcessor('moonshine-capture', MoonshineCapture);
         // under.
         showProvisional,
         discardProvisional,
+        metrics: snapshotCaptureMetrics,
+        pendingAudioSeconds,
+        workerQueuedSeconds,
+        pcm: () => recording.samples.slice(0, recording.length),
       };
     </script>
   </body>

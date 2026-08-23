@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set VERSION=0.1.1
+set VERSION=0.1.3
 set REPO=moonshine-ai/moonshine
 
 REM Get the directory where this script is located
@@ -48,9 +48,9 @@ set LIB_DIR=!BINARY_DIR!\lib
 md !LIB_DIR!
 
 copy /Y !BUILD_DIR!\Release\moonshine.lib !LIB_DIR!\
-copy /Y !BUILD_DIR!\..\bin-tokenizer\build\Release\bin-tokenizer.lib !LIB_DIR!\
-copy /Y !BUILD_DIR!\..\ort-utils\build\Release\ort-utils.lib !LIB_DIR!\
-copy /Y !BUILD_DIR!\..\moonshine-utils\build\Release\moonshine-utils.lib !LIB_DIR!\
+copy /Y !BUILD_DIR!\bin-tokenizer\Release\bin-tokenizer.lib !LIB_DIR!\
+copy /Y !BUILD_DIR!\ort-utils\Release\ort-utils.lib !LIB_DIR!\
+copy /Y !BUILD_DIR!\moonshine-utils\Release\moonshine-utils.lib !LIB_DIR!\
 copy /Y !CORE_DIR!\third-party\onnxruntime\lib\windows\x86_64\onnxruntime.lib !LIB_DIR!\
 copy /Y !CORE_DIR!\third-party\onnxruntime\lib\windows\x86_64\onnxruntime.dll !LIB_DIR!\
 

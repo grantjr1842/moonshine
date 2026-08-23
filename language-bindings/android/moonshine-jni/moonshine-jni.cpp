@@ -625,6 +625,47 @@ Java_ai_moonshine_voice_JNI_moonshineStopStream(JNIEnv * /* env */,
 }
 
 extern "C" JNIEXPORT int JNICALL
+Java_ai_moonshine_voice_JNI_moonshineTranscriberSetKeyterms(
+    JNIEnv *env, jobject /* this */, jint transcriber_handle,
+    jstring keyterms) {
+  try {
+    // A null string clears the list, which is what the C API does with NULL.
+    if (keyterms == nullptr) {
+      return moonshine_transcriber_set_keyterms(transcriber_handle, nullptr);
+    }
+    const char *keyterms_str = env->GetStringUTFChars(keyterms, nullptr);
+    const int32_t error =
+        moonshine_transcriber_set_keyterms(transcriber_handle, keyterms_str);
+    env->ReleaseStringUTFChars(keyterms, keyterms_str);
+    return error;
+  } catch (const std::exception &e) {
+    ALOGE("moonshineTranscriberSetKeyterms: %s\n", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+}
+
+extern "C" JNIEXPORT int JNICALL
+Java_ai_moonshine_voice_JNI_moonshineTranscriberSetContext(
+    JNIEnv *env, jobject /* this */, jint transcriber_handle, jstring context,
+    jint max_terms) {
+  try {
+    // A null string turns biasing off, which is what the C API does with NULL.
+    if (context == nullptr) {
+      return moonshine_transcriber_set_context(transcriber_handle, nullptr,
+                                               max_terms);
+    }
+    const char *context_str = env->GetStringUTFChars(context, nullptr);
+    const int32_t error = moonshine_transcriber_set_context(
+        transcriber_handle, context_str, max_terms);
+    env->ReleaseStringUTFChars(context, context_str);
+    return error;
+  } catch (const std::exception &e) {
+    ALOGE("moonshineTranscriberSetContext: %s\n", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+}
+
+extern "C" JNIEXPORT int JNICALL
 Java_ai_moonshine_voice_JNI_moonshineAddAudioToStream(
     JNIEnv *env, jobject /* this */, jint transcriber_handle,
     jint stream_handle, jfloatArray audio_data, jint sample_rate, jint flags) {
