@@ -59,6 +59,8 @@ def _resolve_audio(raw: str, data_root: Path) -> str:
 
 
 def _utterance_from_mapping(row: dict, data_root: Path) -> Utterance:
+    if not isinstance(row, dict):
+        raise ValueError("each utterance must be a JSON object")
     text = row.get("text") or row.get("transcript") or row.get("transcription")
     if not text or not str(text).strip():
         raise ValueError("each utterance needs a non-empty 'text' field")

@@ -70,7 +70,9 @@ class AtcosimIndex:
     other: List[Utterance]
 
 
-def index_atcosim() -> AtcosimIndex:
+def index_atcosim(
+    revision: Optional[str] = None, split_revision: Optional[str] = None
+) -> AtcosimIndex:
     """Speaker-disjoint train pool and scored test utterances, no audio yet.
 
     ATCOSIM's widely-used Hub split is utterance-random: all four scored
@@ -82,12 +84,17 @@ def index_atcosim() -> AtcosimIndex:
 
     splits = {}
     with open(
-        hf_hub_download(SPLITS_REPO, "atcosim_splits.csv", repo_type="dataset")
+        hf_hub_download(
+            SPLITS_REPO,
+            "atcosim_splits.csv",
+            repo_type="dataset",
+            revision=split_revision,
+        )
     ) as handle:
         for row in csv.DictReader(handle):
             splits[row["id"]] = row
 
-    fs = HfFileSystem()
+    fs = HfFileSystem(revision=revision) if revision else HfFileSystem()
     train, scored, other = [], [], []
     for remote in sorted(fs.glob(f"datasets/{ATCOSIM_REPO}/data/*.parquet")):
         shard = remote.split("/")[-1]
@@ -119,7 +126,9 @@ def index_atcosim() -> AtcosimIndex:
     return AtcosimIndex(train=train, scored=scored, other=other)
 
 
-def decode_parquet_audio(repo: str, rows: Sequence[Utterance]) -> List[np.ndarray]:
+def decode_parquet_audio(
+    repo: str, rows: Sequence[Utterance], revision: Optional[str] = None
+) -> List[np.ndarray]:
     """Decode utterances, opening each parquet file once rather than once per row."""
     from huggingface_hub import hf_hub_download
 
@@ -128,7 +137,9 @@ def decode_parquet_audio(repo: str, rows: Sequence[Utterance]) -> List[np.ndarra
     for i, row in enumerate(rows):
         by_shard.setdefault(row.shard, []).append(i)
     for shard, which in by_shard.items():
-        path = hf_hub_download(repo, f"data/{shard}", repo_type="dataset")
+        path = hf_hub_download(
+            repo, f"data/{shard}", repo_type="dataset", revision=revision
+        )
         column = pq.read_table(path, columns=["audio"]).column("audio")
         for i in which:
             blob = column[rows[i].row].as_py()
@@ -138,19 +149,25 @@ def decode_parquet_audio(repo: str, rows: Sequence[Utterance]) -> List[np.ndarra
     return waves  # type: ignore[return-value]
 
 
-def decode_atcosim(rows: Sequence[Utterance]) -> List[np.ndarray]:
+def decode_atcosim(
+    rows: Sequence[Utterance], revision: Optional[str] = None
+) -> List[np.ndarray]:
     """Decode ATCOSIM utterances from the Hub parquet shards."""
-    return decode_parquet_audio(ATCOSIM_REPO, rows)
+    return decode_parquet_audio(ATCOSIM_REPO, rows, revision)
 
 
-def decode_uwb_atcc(rows: Sequence[Utterance]) -> List[np.ndarray]:
+def decode_uwb_atcc(
+    rows: Sequence[Utterance], revision: Optional[str] = None
+) -> List[np.ndarray]:
     """Decode UWB-ATCC utterances from the Hub parquet shards."""
-    return decode_parquet_audio(UWB_REPO, rows)
+    return decode_parquet_audio(UWB_REPO, rows, revision)
 
 
-def decode_atco2(rows: Sequence[Utterance]) -> List[np.ndarray]:
+def decode_atco2(
+    rows: Sequence[Utterance], revision: Optional[str] = None
+) -> List[np.ndarray]:
     """Decode ATCO2-test-set-1h utterances. Eval only; never train on this."""
-    return decode_parquet_audio(ATCO2_REPO, rows)
+    return decode_parquet_audio(ATCO2_REPO, rows, revision)
 
 
 def uwb_session(utt_id: str) -> str:
@@ -176,10 +193,14 @@ class UwbAtccIndex:
     scored: List[Utterance]
 
 
-def _iter_parquet_meta(repo: str, columns=("id", "text", "duration")):
+def _iter_parquet_meta(
+    repo: str,
+    columns=("id", "text", "duration"),
+    revision: Optional[str] = None,
+):
     from huggingface_hub import HfFileSystem
 
-    fs = HfFileSystem()
+    fs = HfFileSystem(revision=revision) if revision else HfFileSystem()
     for remote in sorted(fs.glob(f"datasets/{repo}/data/*.parquet")):
         shard = remote.split("/")[-1]
         with fs.open(remote, "rb") as handle:
@@ -187,9 +208,9 @@ def _iter_parquet_meta(repo: str, columns=("id", "text", "duration")):
         yield shard, table
 
 
-def _uwb_index_from_shards() -> UwbAtccIndex:
+def _uwb_index_from_shards(revision: Optional[str] = None) -> UwbAtccIndex:
     scored, train_raw = [], []
-    for shard, table in _iter_parquet_meta(UWB_REPO):
+    for shard, table in _iter_parquet_meta(UWB_REPO, revision=revision):
         ids = table.column("id").to_pylist()
         texts = table.column("text").to_pylist()
         durations = table.column("duration").to_pylist()
@@ -214,7 +235,9 @@ def _uwb_index_from_shards() -> UwbAtccIndex:
     return UwbAtccIndex(train=train, scored=scored)
 
 
-def index_uwb_atcc() -> UwbAtccIndex:
+def index_uwb_atcc(
+    revision: Optional[str] = None, split_revision: Optional[str] = None
+) -> UwbAtccIndex:
     """Session-disjoint UWB-ATCC train pool and official test utterances.
 
     Prefers the published no-audio split definition when present; otherwise
@@ -225,10 +248,13 @@ def index_uwb_atcc() -> UwbAtccIndex:
 
     try:
         split_path = hf_hub_download(
-            UWB_SPLITS_REPO, "uwb_atcc_splits.csv", repo_type="dataset"
+            UWB_SPLITS_REPO,
+            "uwb_atcc_splits.csv",
+            repo_type="dataset",
+            revision=split_revision,
         )
     except Exception:
-        return _uwb_index_from_shards()
+        return _uwb_index_from_shards(revision)
 
     splits = {}
     with open(split_path) as handle:
@@ -236,7 +262,7 @@ def index_uwb_atcc() -> UwbAtccIndex:
             splits[row["id"]] = row
 
     train, scored = [], []
-    for shard, table in _iter_parquet_meta(UWB_REPO):
+    for shard, table in _iter_parquet_meta(UWB_REPO, revision=revision):
         ids = table.column("id").to_pylist()
         texts = table.column("text").to_pylist()
         durations = table.column("duration").to_pylist()
@@ -257,13 +283,15 @@ def index_uwb_atcc() -> UwbAtccIndex:
             if meta.get("session_disjoint_train") == "True":
                 train.append(row)
     if not train or not scored:
-        return _uwb_index_from_shards()
+        return _uwb_index_from_shards(revision)
     return UwbAtccIndex(train=train, scored=scored)
 
 
-def uwb_split_csv_rows(index: Optional[UwbAtccIndex] = None) -> List[dict]:
+def uwb_split_csv_rows(
+    index: Optional[UwbAtccIndex] = None, revision: Optional[str] = None
+) -> List[dict]:
     """No-audio split definition, one row per utterance. Safe to publish."""
-    indexed = index or _uwb_index_from_shards()
+    indexed = index or _uwb_index_from_shards(revision)
     train_ids = {r.utterance_id for r in indexed.train}
     scored_ids = {r.utterance_id for r in indexed.scored}
     rows = []
@@ -283,10 +311,10 @@ def uwb_split_csv_rows(index: Optional[UwbAtccIndex] = None) -> List[dict]:
     return rows
 
 
-def index_atco2() -> List[Utterance]:
+def index_atco2(revision: Optional[str] = None) -> List[Utterance]:
     """ATCO2-test-set-1h. Held-out transfer eval; do not train on this."""
     rows = []
-    for shard, table in _iter_parquet_meta(ATCO2_REPO):
+    for shard, table in _iter_parquet_meta(ATCO2_REPO, revision=revision):
         columns = {name: table.column(name).to_pylist() for name in table.column_names}
         n = len(next(iter(columns.values())))
         ids = columns.get("id") or [f"{shard}:{i}" for i in range(n)]
@@ -396,23 +424,35 @@ def parquet_source(
 
 
 def atcosim_source(
-    pool: Sequence[Utterance], hours: float, text_mode: str
+    pool: Sequence[Utterance],
+    hours: float,
+    text_mode: str,
+    revision: Optional[str] = None,
 ) -> Iterator[Tuple[np.ndarray, str]]:
-    yield from parquet_source(decode_atcosim, pool, hours, text_mode)
+    yield from parquet_source(
+        lambda rows: decode_atcosim(rows, revision), pool, hours, text_mode
+    )
 
 
 def uwb_atcc_source(
-    pool: Sequence[Utterance], hours: float, text_mode: str
+    pool: Sequence[Utterance],
+    hours: float,
+    text_mode: str,
+    revision: Optional[str] = None,
 ) -> Iterator[Tuple[np.ndarray, str]]:
-    yield from parquet_source(decode_uwb_atcc, pool, hours, text_mode)
+    yield from parquet_source(
+        lambda rows: decode_uwb_atcc(rows, revision), pool, hours, text_mode
+    )
 
 
-def replay_source(hours: float, repo: str = REPLAY_REPO):
+def replay_source(
+    hours: float, repo: str = REPLAY_REPO, revision: Optional[str] = None
+):
     from huggingface_hub import hf_hub_download, list_repo_files
 
     shards = sorted(
         f
-        for f in list_repo_files(repo, repo_type="dataset")
+        for f in list_repo_files(repo, repo_type="dataset", revision=revision)
         if f.endswith(".arrow")
     )
     seconds = 0.0
@@ -420,7 +460,7 @@ def replay_source(hours: float, repo: str = REPLAY_REPO):
         if seconds >= hours * 3600:
             break
         table = pa.ipc.open_file(
-            hf_hub_download(repo, shard, repo_type="dataset")
+            hf_hub_download(repo, shard, repo_type="dataset", revision=revision)
         ).read_all()
         audio, text, dur = (
             table.column("audio"),
@@ -438,11 +478,18 @@ def replay_source(hours: float, repo: str = REPLAY_REPO):
         del table
 
 
-def librispeech_eval(limit: Optional[int], seed: int = 0):
+def librispeech_eval(
+    limit: Optional[int], seed: int = 0, revision: Optional[str] = None
+):
     from huggingface_hub import hf_hub_download
 
     table = pq.read_table(
-        hf_hub_download(LIBRISPEECH[0], LIBRISPEECH[1], repo_type="dataset"),
+        hf_hub_download(
+            LIBRISPEECH[0],
+            LIBRISPEECH[1],
+            repo_type="dataset",
+            revision=revision,
+        ),
         columns=["audio", "text"],
     )
     audio, text = table.column("audio"), table.column("text")

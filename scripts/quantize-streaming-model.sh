@@ -1,4 +1,5 @@
-#!/bin/bash -ex
+#!/bin/bash
+set -euo pipefail
 
 # --per-channel is load-bearing for accuracy, not a size/speed tradeoff. Without
 # it every weight tensor gets a single scale, which is badly mismatched to the
@@ -8,12 +9,19 @@
 # worth 7.58% -> 4.83% WER on tiny, 3.03% -> 2.61% on small, and 2.37% -> 2.17%
 # on medium, for 0.5% more model size. See experiments.md in moonshine-internal.
 PER_CHANNEL_ARGS=(--per-channel)
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODEL_DIR="$(cd "$1" && pwd)"
 cd "${MODEL_DIR}" || exit 1
 
+converted=0
+
 for ONNX_NAME in frontend encoder adapter cross_kv decoder_kv; do
+	if [[ ! -f "${ONNX_NAME}.onnx" ]]; then
+	    echo "skipping ${ONNX_NAME}: graph is not present in this export directory"
+	    continue
+	fi
     if [ "${ONNX_NAME}" == "frontend" ]; then
 	    METHOD="integer_weights"
 		FILE_SUFFIX="quantized_weights"
@@ -21,7 +29,7 @@ for ONNX_NAME in frontend encoder adapter cross_kv decoder_kv; do
 		METHOD="integer_activations"
 		FILE_SUFFIX="quantized_activations"
 	fi
-    python3 -m onnx_shrink_ray.shrink \
+    "${PYTHON_BIN}" -m onnx_shrink_ray.shrink \
       --ir-version 10 \
       --method ${METHOD} \
       "${PER_CHANNEL_ARGS[@]}" \
@@ -31,15 +39,21 @@ for ONNX_NAME in frontend encoder adapter cross_kv decoder_kv; do
         # folds that chain back to float32 (~4x the file) and the frontend is
         # the wrong graph to pay dequant on every chunk, so split: fused
         # compute in frontend.model.ort, int8 weights dequantized once at load.
-        python3 "${SCRIPT_DIR}/split-model-weights.py" \
+        "${PYTHON_BIN}" "${SCRIPT_DIR}/split-model-weights.py" \
           --per-channel --force \
           "${ONNX_NAME}_${FILE_SUFFIX}.onnx"
         mv "${ONNX_NAME}_${FILE_SUFFIX}.model.ort" "${ONNX_NAME}.model.ort"
         mv "${ONNX_NAME}_${FILE_SUFFIX}.weights.ort" "${ONNX_NAME}.weights.ort"
     else
-        python3 -m onnxruntime.tools.convert_onnx_models_to_ort "${ONNX_NAME}_${FILE_SUFFIX}.onnx"
+        "${PYTHON_BIN}" -m onnxruntime.tools.convert_onnx_models_to_ort "${ONNX_NAME}_${FILE_SUFFIX}.onnx"
         mv "${ONNX_NAME}_${FILE_SUFFIX}.ort" "${ONNX_NAME}.ort"
     fi
+    converted=$((converted + 1))
 done
 
-python3 "${SCRIPT_DIR}/check-ort-weight-storage.py" "${MODEL_DIR}"
+if [[ "${converted}" -eq 0 ]]; then
+    echo "error: no ONNX graphs were found in $1" >&2
+    exit 1
+fi
+
+"${PYTHON_BIN}" "${SCRIPT_DIR}/check-ort-weight-storage.py" "${MODEL_DIR}"

@@ -59,3 +59,14 @@ def test_empty_text_is_rejected(tmp_path):
         assert "text" in str(error)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_non_object_json_utterance_is_rejected(tmp_path):
+    manifest = tmp_path / "bad.json"
+    manifest.write_text(json.dumps({"utterances": ["not an object"]}))
+    try:
+        load_manifest(str(manifest))
+    except ValueError as error:
+        assert "JSON object" in str(error)
+    else:
+        raise AssertionError("expected ValueError")

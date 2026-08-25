@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from moonshine_voice.lora._deps import lora_deps_error
+from moonshine_voice.lora._deps import TRAINING_PACKAGES, lora_deps_error
 
 
 ISOLATION_SNIPPET = """
@@ -44,6 +44,12 @@ def test_lora_deps_error_points_at_the_extra():
     assert "inference wheel" in message
 
 
+def test_lora_extra_declares_accelerate_openssl_compatibility():
+    packages = dict(TRAINING_PACKAGES)
+    assert packages["accelerate"] == "accelerate>=1.0"
+    assert packages["OpenSSL"] == "pyOpenSSL>=24.2.1"
+
+
 def test_help_does_not_need_the_extra():
     result = subprocess.run(
         [sys.executable, "-m", "moonshine_voice.lora", "--help"],
@@ -56,3 +62,44 @@ def test_help_does_not_need_the_extra():
     assert "--train-manifest" in result.stdout
     assert "--sites" in result.stdout
     assert "--adapt" in result.stdout
+
+
+def test_invalid_training_options_fail_before_loading_the_extra():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "moonshine_voice.lora",
+            "--train-manifest",
+            "domain.jsonl",
+            "--replay-ratio",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 2
+    assert "--replay-ratio" in result.stderr
+
+
+def test_invalid_export_graph_fails_before_loading_the_extra(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "moonshine_voice.lora",
+            "--export",
+            "--model",
+            "checkpoint",
+            "--output-dir",
+            str(tmp_path),
+            "--graphs",
+            "not-a-graph",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 2
+    assert "unknown graph" in result.stderr

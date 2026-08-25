@@ -7,6 +7,7 @@ so ``--help`` does not load PyTorch.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import time
 from argparse import Namespace
@@ -17,7 +18,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors.torch import save_file
-from transformers import AutoProcessor, MoonshineStreamingForConditionalGeneration
 
 from moonshine_voice.lora.adapter import (
     adapter_parameters,
@@ -134,9 +134,10 @@ def tail_split(entries, hours):
 
 
 _NORMALIZER = None
+_NORMALIZER_REVISION = None
 
 
-def english_normalizer():
+def english_normalizer(revision: Optional[str] = None):
     """Whisper English text normalizer, loaded once.
 
     Lowercases, strips punctuation, and expands numbers so WER compares words
@@ -144,8 +145,8 @@ def english_normalizer():
     numerals stay as separate tokens, which is why ATCOSIM's number convention
     dominates the baseline error rate.
     """
-    global _NORMALIZER
-    if _NORMALIZER is None:
+    global _NORMALIZER, _NORMALIZER_REVISION
+    if _NORMALIZER is None or _NORMALIZER_REVISION != revision:
         import json as json_mod
 
         from huggingface_hub import hf_hub_download
@@ -153,11 +154,14 @@ def english_normalizer():
             EnglishTextNormalizer,
         )
 
-        _NORMALIZER = EnglishTextNormalizer(
-            json_mod.load(
-                open(hf_hub_download("openai/whisper-tiny", "normalizer.json"))
-            )
+        normalizer_path = hf_hub_download(
+            "openai/whisper-tiny",
+            "normalizer.json",
+            revision=revision,
         )
+        with open(normalizer_path, encoding="utf-8") as handle:
+            _NORMALIZER = EnglishTextNormalizer(json_mod.load(handle))
+        _NORMALIZER_REVISION = revision
     return _NORMALIZER
 
 
@@ -178,10 +182,10 @@ def transcribe(model, processor, waves, device, batch_size=16, max_new_tokens=96
     return texts
 
 
-def corpus_wer(refs, hyps):
+def corpus_wer(refs, hyps, normalizer_revision: Optional[str] = None):
     import jiwer
 
-    normalize = english_normalizer()
+    normalize = english_normalizer(normalizer_revision)
     refs_n = [normalize(r) for r in refs]
     hyps_n = [normalize(h) for h in hyps]
     keep = [i for i, r in enumerate(refs_n) if r.strip()]
@@ -195,10 +199,142 @@ def sample_indices(n, limit, seed=0):
     return sorted(np.random.default_rng(seed).choice(n, limit, replace=False).tolist())
 
 
+def _local_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    files = [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
+    for file_path in files:
+        digest.update(str(file_path.relative_to(path.parent if path.is_dir() else path)).encode())
+        with file_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_fingerprint(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hf_provenance(repo: str, repo_type: str, revision: Optional[str] = None) -> dict:
+    """Resolve immutable Hub provenance, or explicitly record why it failed."""
+    local = Path(repo).expanduser()
+    if local.exists():
+        return {
+            "repo": str(local),
+            "repo_type": "local",
+            "requested_revision": revision,
+            "resolved_commit": _local_fingerprint(local),
+            "status": "complete",
+        }
+    try:
+        from huggingface_hub import HfApi
+
+        info = (
+            HfApi().model_info(repo, revision=revision)
+            if repo_type == "model"
+            else HfApi().dataset_info(repo, revision=revision)
+        )
+        return {
+            "repo": repo,
+            "repo_type": repo_type,
+            "requested_revision": revision,
+            "resolved_commit": info.sha,
+            "status": "complete",
+        }
+    except Exception as exc:
+        return {
+            "repo": repo,
+            "repo_type": repo_type,
+            "requested_revision": revision,
+            "resolved_commit": None,
+            "status": "unavailable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def build_provenance(args: Namespace) -> dict:
+    entries = [
+        hf_provenance(args.model, "model", getattr(args, "model_revision", None)),
+        hf_provenance(
+            "openai/whisper-tiny",
+            "model",
+            getattr(args, "normalizer_revision", None),
+        ),
+    ]
+    if args.train_manifest:
+        entries.append(hf_provenance(args.train_manifest, "local"))
+    if args.eval_manifest:
+        entries.append(hf_provenance(args.eval_manifest, "local"))
+    if args.dataset == "atcosim":
+        entries.extend(
+            [
+                hf_provenance(
+                    "Jzuluaga/atcosim_corpus",
+                    "dataset",
+                    getattr(args, "dataset_revision", None),
+                ),
+                hf_provenance(
+                    "moonshine-ai/atcosim-speaker-disjoint-splits",
+                    "dataset",
+                    getattr(args, "split_revision", None),
+                ),
+            ]
+        )
+    elif args.dataset == "uwb_atcc":
+        entries.extend(
+            [
+                hf_provenance(
+                    "Jzuluaga/uwb_atcc",
+                    "dataset",
+                    getattr(args, "dataset_revision", None),
+                ),
+                hf_provenance(
+                    "moonshine-ai/uwb-atcc-session-disjoint-splits",
+                    "dataset",
+                    getattr(args, "split_revision", None),
+                ),
+            ]
+        )
+    if not args.no_replay:
+        entries.append(
+            hf_provenance(
+                args.replay_repo,
+                "dataset",
+                getattr(args, "replay_revision", None),
+            )
+        )
+    if getattr(args, "eval_dataset", None) == "atco2":
+        entries.append(
+            hf_provenance(
+                "Jzuluaga/atco2_corpus_1h",
+                "dataset",
+                getattr(args, "eval_dataset_revision", None),
+            )
+        )
+    if args.canary:
+        entries.append(
+            hf_provenance(
+                "openslr/librispeech_asr",
+                "dataset",
+                getattr(args, "canary_revision", None),
+            )
+        )
+    return {
+        "complete": all(item["status"] == "complete" for item in entries),
+        "entries": entries,
+    }
+
+
 def _load_train_rows(args) -> tuple:
     """Return (train_rows, eval_rows, domain_name, source_builder)."""
     if args.dataset == "atcosim":
-        indexed = index_atcosim()
+        indexed = index_atcosim(
+            getattr(args, "dataset_revision", None),
+            getattr(args, "split_revision", None),
+        )
         train_pool, scored = indexed.train, indexed.scored
         print(
             f"ATCOSIM speaker-disjoint train: {len(train_pool)} utts / "
@@ -213,12 +349,20 @@ def _load_train_rows(args) -> tuple:
         train_hours = args.train_hours if args.train_hours is not None else 2.0
 
         def source(hours, pool=train_pool, mode=text_mode):
-            return atcosim_source(pool, hours, mode)
+            return atcosim_source(
+                pool,
+                hours,
+                mode,
+                getattr(args, "dataset_revision", None),
+            )
 
         return train_pool, scored, "atcosim", source, text_mode, train_hours
 
     if args.dataset == "uwb_atcc":
-        indexed = index_uwb_atcc()
+        indexed = index_uwb_atcc(
+            getattr(args, "dataset_revision", None),
+            getattr(args, "split_revision", None),
+        )
         train_pool, scored = indexed.train, indexed.scored
         print(
             f"UWB-ATCC session-disjoint train: {len(train_pool)} utts / "
@@ -233,7 +377,12 @@ def _load_train_rows(args) -> tuple:
         train_hours = args.train_hours if args.train_hours is not None else 2.0
 
         def source(hours, pool=train_pool, mode=text_mode):
-            return uwb_atcc_source(pool, hours, mode)
+            return uwb_atcc_source(
+                pool,
+                hours,
+                mode,
+                getattr(args, "dataset_revision", None),
+            )
 
         return train_pool, scored, "uwb_atcc", source, text_mode, train_hours
 
@@ -300,6 +449,7 @@ def fit_adapter(
     extra_summary: Optional[dict] = None,
     sites: str = "decoder",
     adapt: str = "lora",
+    model_revision: Optional[str] = None,
 ):
     """Train LoRA or a full fine-tune on already-built caches.
 
@@ -312,9 +462,12 @@ def fit_adapter(
     prefix = f"[{tag}] " if tag else ""
 
     if model is None:
+        from transformers import MoonshineStreamingForConditionalGeneration
+
         print(f"{prefix}loading {model_id}")
         model = MoonshineStreamingForConditionalGeneration.from_pretrained(
-            model_id
+            model_id,
+            revision=model_revision,
         ).to(device)
     model.train()
     base_keys = set(model.state_dict())
@@ -527,7 +680,9 @@ def fit_adapter(
             print(f"{prefix}wrote full fine-tune {out / 'adapted'}")
 
     summary = {
+        "receipt_schema_version": 2,
         "model": model_id,
+        "model_revision": model_revision,
         "rank": rank if lora_sites is not None else 0,
         "lr": lr,
         "batch_size": batch_size,
@@ -543,6 +698,12 @@ def fit_adapter(
         "adapter_bytes": adapter_file.stat().st_size if adapter_file else 0,
         "adapt": adapt,
         "sites": sites if lora_sites is not None else "all",
+        "seed": seed,
+        "max_steps": max_steps,
+        "eval_every": eval_every,
+        "patience": patience,
+        "warmup": warmup,
+        "device": device,
     }
     if extra_summary:
         summary.update(extra_summary)
@@ -562,6 +723,7 @@ def train_adapter(
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    provenance = build_provenance(args)
     train_pool, eval_rows, domain, source, text_mode, train_hours = _load_train_rows(args)
     if text_mode == "lower":
         print("text mode 'lower' (corpus is uppercase; the model is not)")
@@ -593,7 +755,12 @@ def train_adapter(
         print("warning: training on CPU; a GPU is strongly recommended")
 
     if processor is None:
-        processor = AutoProcessor.from_pretrained(args.model)
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(
+            args.model,
+            revision=getattr(args, "model_revision", None),
+        )
 
     def encode(text):
         return encode_text(processor, apply_text_mode(text, text_mode))
@@ -607,7 +774,11 @@ def train_adapter(
             "replay",
             work,
             args.replay_hours + args.replay_dev_hours,
-            lambda h: replay_source(h, args.replay_repo),
+            lambda h: replay_source(
+                h,
+                args.replay_repo,
+                getattr(args, "replay_revision", None),
+            ),
             lambda text: encode_text(processor, text),
         )
 
@@ -651,9 +822,27 @@ def train_adapter(
             "text_mode": text_mode,
             "adapt": adapt,
             "sites": sites,
+            "provenance": provenance,
+            "source_revisions": {
+                "dataset": getattr(args, "dataset_revision", None),
+                "split": getattr(args, "split_revision", None),
+                "replay": getattr(args, "replay_revision", None),
+                "eval_dataset": getattr(args, "eval_dataset_revision", None),
+                "canary": getattr(args, "canary_revision", None),
+                "normalizer": getattr(args, "normalizer_revision", None),
+            },
+            "cache_fingerprints": {
+                "domain_index": _file_fingerprint(work / f"{domain}_index.json"),
+                "replay_index": (
+                    _file_fingerprint(work / "replay_index.json")
+                    if replay_index
+                    else None
+                ),
+            },
         },
         sites=sites,
         adapt=adapt,
+        model_revision=getattr(args, "model_revision", None),
     )
     if args.eval or args.canary or getattr(args, "eval_dataset", None):
         summary = json.loads((out / "summary.json").read_text())
@@ -668,31 +857,46 @@ def _run_eval(args, model, processor, device, eval_rows, domain, out, summary):
         idx = sample_indices(len(eval_rows), args.eval_limit, args.seed)
         chosen = [eval_rows[i] for i in idx]
         if args.dataset == "atcosim":
-            waves = decode_atcosim(chosen)
+            waves = decode_atcosim(
+                chosen, getattr(args, "dataset_revision", None)
+            )
         elif args.dataset == "uwb_atcc":
-            waves = decode_uwb_atcc(chosen)
+            waves = decode_uwb_atcc(
+                chosen, getattr(args, "dataset_revision", None)
+            )
         else:
             waves = [load_wave(r.audio) for r in chosen]
         refs = [r.text for r in chosen]
         print(f"scoring {len(chosen)} in-domain utterances")
         hyps = transcribe(model, processor, waves, device, batch_size=args.batch_size)
-        summary["eval_wer"] = corpus_wer(refs, hyps)
+        summary["eval_wer"] = corpus_wer(
+            refs, hyps, getattr(args, "normalizer_revision", None)
+        )
         print(f"in-domain WER {summary['eval_wer']:.2f}%")
     eval_dataset = getattr(args, "eval_dataset", None)
     if eval_dataset == "atco2":
-        atco2_rows = index_atco2()
+        eval_revision = getattr(args, "eval_dataset_revision", None)
+        atco2_rows = index_atco2(eval_revision)
         idx = sample_indices(len(atco2_rows), args.eval_limit, args.seed)
         chosen = [atco2_rows[i] for i in idx]
-        waves = decode_atco2(chosen)
+        waves = decode_atco2(chosen, eval_revision)
         refs = [r.text for r in chosen]
         print(f"scoring {len(chosen)} ATCO2-test-set-1h utterances (transfer, not train)")
         hyps = transcribe(model, processor, waves, device, batch_size=args.batch_size)
-        summary["atco2_wer"] = corpus_wer(refs, hyps)
+        summary["atco2_wer"] = corpus_wer(
+            refs, hyps, getattr(args, "normalizer_revision", None)
+        )
         print(f"ATCO2 WER {summary['atco2_wer']:.2f}%")
     if args.canary:
         print("scoring LibriSpeech test-clean canary")
-        refs, waves = librispeech_eval(args.canary_limit, args.seed)
+        refs, waves = librispeech_eval(
+            args.canary_limit,
+            args.seed,
+            getattr(args, "canary_revision", None),
+        )
         hyps = transcribe(model, processor, waves, device, batch_size=args.batch_size)
-        summary["canary_wer"] = corpus_wer(refs, hyps)
+        summary["canary_wer"] = corpus_wer(
+            refs, hyps, getattr(args, "normalizer_revision", None)
+        )
         print(f"LibriSpeech WER {summary['canary_wer']:.2f}%")
     (out / "summary.json").write_text(json.dumps(summary, indent=2))

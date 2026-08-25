@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List, Optional
+
+VALID_GRAPHS = frozenset(
+    {"frontend", "encoder", "adapter", "cross_kv", "decoder_kv"}
+)
 
 
 def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
@@ -67,6 +72,21 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         help="general-domain replay corpus (HF dataset id)",
     )
     data.add_argument(
+        "--dataset-revision",
+        default=None,
+        help="immutable HF commit/tag for the selected training dataset",
+    )
+    data.add_argument(
+        "--split-revision",
+        default=None,
+        help="immutable HF commit/tag for the published split definition",
+    )
+    data.add_argument(
+        "--replay-revision",
+        default=None,
+        help="immutable HF commit/tag for the replay dataset",
+    )
+    data.add_argument(
         "--no-replay",
         action="store_true",
         help="train on in-domain audio only. Not recommended: the canary "
@@ -91,6 +111,26 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         "--model",
         default="moonshine-ai/moonshine-streaming-medium",
         help="HF hub id or local save_pretrained directory",
+    )
+    model.add_argument(
+        "--model-revision",
+        default=None,
+        help="immutable HF model commit/tag; recorded in summary.json",
+    )
+    model.add_argument(
+        "--normalizer-revision",
+        default=None,
+        help="immutable HF revision for Whisper normalizer.json",
+    )
+    model.add_argument(
+        "--eval-dataset-revision",
+        default=None,
+        help="immutable HF revision for the optional ATCO2 transfer set",
+    )
+    model.add_argument(
+        "--canary-revision",
+        default=None,
+        help="immutable HF revision for the optional LibriSpeech canary",
     )
     model.add_argument(
         "--adapt",
@@ -171,14 +211,77 @@ def build_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     return parser
 
 
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject combinations that would otherwise fail deep in a long run."""
+    if args.export:
+        graphs = {part.strip() for part in args.graphs.split(",") if part.strip()}
+        if args.graphs != "all" and not graphs:
+            parser.error("--graphs must name at least one graph")
+        unknown = graphs - VALID_GRAPHS
+        if unknown:
+            parser.error(
+                "unknown graph(s): "
+                + ", ".join(sorted(unknown))
+                + "; choose from "
+                + ", ".join(sorted(VALID_GRAPHS))
+            )
+        if args.tokenizer_bin and not Path(args.tokenizer_bin).is_file():
+            parser.error(f"--tokenizer-bin not found: {args.tokenizer_bin}")
+        if args.graphs != "all":
+            args.graphs = ",".join(sorted(graphs))
+        return
+
+    if (args.dataset is None) == (args.train_manifest is None):
+        parser.error("choose exactly one of --dataset or --train-manifest")
+
+    for name, value in (
+        ("--rank", args.rank),
+        ("--lr", args.lr),
+        ("--batch-size", args.batch_size),
+        ("--max-steps", args.max_steps),
+        ("--eval-every", args.eval_every),
+        ("--patience", args.patience),
+    ):
+        if value is None:
+            continue
+        if value <= 0:
+            parser.error(f"{name} must be greater than zero")
+    if args.alpha is not None and args.alpha <= 0:
+        parser.error("--alpha must be greater than zero")
+    for name, value in (
+        ("--dev-hours", args.dev_hours),
+        ("--replay-dev-hours", args.replay_dev_hours),
+        ("--replay-hours", args.replay_hours),
+        ("--warmup", args.warmup),
+    ):
+        if value is None:
+            continue
+        if value < 0:
+            parser.error(f"{name} cannot be negative")
+    if args.train_hours is not None and args.train_hours <= 0:
+        parser.error("--train-hours must be greater than zero")
+    if not 0 <= args.replay_ratio < 1:
+        parser.error("--replay-ratio must be between 0 (inclusive) and 1 (exclusive)")
+    for name, value in (
+        ("--eval-limit", args.eval_limit),
+        ("--canary-limit", args.canary_limit),
+    ):
+        if value is not None and value <= 0:
+            parser.error(f"{name} must be greater than zero")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    validate_args(parser, args)
 
     from moonshine_voice.lora._deps import require_lora_deps
 
     try:
-        require_lora_deps()
+        require_lora_deps(
+            include_eval=args.eval or args.canary,
+            include_export=args.export,
+        )
     except ImportError as error:
         print(error, file=sys.stderr)
         return 1
