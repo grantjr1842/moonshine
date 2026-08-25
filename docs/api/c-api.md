@@ -96,8 +96,17 @@ All API calls are thread-safe. Work on a single transcriber is serialized, so co
 | `MOONSHINE_ERROR_UNKNOWN` | `-1` |
 | `MOONSHINE_ERROR_INVALID_HANDLE` | `-2` |
 | `MOONSHINE_ERROR_INVALID_ARGUMENT` | `-3` |
+| `MOONSHINE_ERROR_BUSY` | `-4` |
 
 Loader functions that return a handle also use negative values as errors; convert any non-success code with `moonshine_error_to_string()`.
+
+[Streaming synthesis](#streaming-synthesis) adds three more, all positive so the usual "negative means failure" test still separates them from real errors. They convert with `moonshine_error_to_string()` too.
+
+| Constant | Value |
+| --- | --- |
+| `MOONSHINE_TTS_NEED_TEXT` | `1` |
+| `MOONSHINE_TTS_END_OF_STREAM` | `2` |
+| `MOONSHINE_TTS_CANCELLED` | `3` |
 
 ### Flags
 
@@ -315,7 +324,7 @@ Loads a transcriber from a set of in-memory model assets keyed by their canonica
 `filenames[i]` is the canonical filename as it would appear on disk under a model directory. Recognized keys depend on `model_arch`:
 
 - Non-streaming (TINY, BASE): `encoder_model.ort`, `decoder_model_merged.ort`, and `tokenizer.bin` are all required, plus the optional word-timestamp decoder `decoder_with_attention.ort` (or the two-pass `alignment_model.ort`) when the `word_timestamps` option is set.
-- Streaming (`*_STREAMING`): `frontend.ort`, `encoder.ort`, `adapter.ort`, `cross_kv.ort`, `decoder_kv.ort`, `streaming_config.json`, and `tokenizer.bin` are all required, plus the optional `decoder_kv_with_attention.ort` when `word_timestamps` is set.
+- Streaming (`*_STREAMING`): `frontend.ort` (or the split pair `frontend.model.ort` + `frontend.weights.ort`), `encoder.ort`, `adapter.ort`, `cross_kv.ort`, `decoder_kv.ort`, `streaming_config.json`, and `tokenizer.bin` are all required, plus the optional `decoder_kv_with_attention.ort` when `word_timestamps` is set.
 - Either kind also accepts `spelling_cnn.ort`, and the two diarization models `segmentation.ort` and `embedding.ort`, which are required when the `identify_speakers` option is set. Fetch those two with `moonshine_get_diarization_dependencies()`.
 
 Unrecognized keys are rejected with `MOONSHINE_ERROR_INVALID_ARGUMENT`, and missing required keys cause the load to fail. The recognized set is the union of the names above across every architecture, plus `spelling_cnn_meta.json`, so passing an asset this architecture or option set has no use for is fine — handing over a whole downloaded model directory works. A misspelled name is reported against the key you passed rather than surfacing later as a missing-asset failure.
@@ -577,7 +586,7 @@ int32_t moonshine_start_stream(
 
 ### `moonshine_stop_stream()`
 
-Stops a stream.
+Stops a stream. Further `moonshine_transcribe_add_audio_to_stream()` calls are rejected, but audio that has not yet been analyzed is kept. Call `moonshine_transcribe_stream()` afterwards to drain that leftover audio and get the final transcript, with all lines marked complete.
 
 ```c
 int32_t moonshine_stop_stream(
@@ -623,6 +632,8 @@ int32_t moonshine_transcribe_add_audio_to_stream(
 
 Analyzes all the audio data in the stream and returns an updated transcript of all the speech segments found. By default this function will only perform full analysis on the audio data if there has been more than 200ms of new samples since the last complete analysis. This is to ensure that too-frequent calls to this function don't result in poor performance. This can be overridden by setting the MOONSHINE_FLAG_FORCE_UPDATE flag.
 
+After `moonshine_stop_stream()`, leftover audio is analyzed even if it is shorter than that interval, so the stop-then-`moonshine_transcribe_stream()` sequence in the example above produces a complete transcript. You do not need `MOONSHINE_FLAG_FORCE_UPDATE` for that final call, and you do not need to have pulled partial transcripts first.
+
 ```c
 int32_t moonshine_transcribe_stream(
     int32_t transcriber_handle,
@@ -649,7 +660,7 @@ Load a text embedding model, embed sentences, compare vectors, and free results.
 
 Creates an embedding model from files on disk.
 
-`model_variant` specifies which model variant to load: "fp32", "fp16", "q8", "q4", or "q4f16". Pass NULL to use the default "q4" variant.
+`model_variant` specifies which model variant to load: "q4" or "q8". Pass NULL to use the default "q4" variant. `"fp32"`, `"fp16"`, and `"q4f16"` are no longer supported.
 
 ```c
 int32_t moonshine_create_embedding_model(
@@ -663,7 +674,7 @@ int32_t moonshine_create_embedding_model(
 | --- | --- |
 | `model_path` | Path to the directory containing the embedding model files (the `.ort` model and `tokenizer.bin`). |
 | `model_arch` | One of the `MOONSHINE_EMBEDDING_MODEL_ARCH_*` constants. Currently only `MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M` is supported. |
-| `model_variant` | Which variant to load: `"fp32"`, `"fp16"`, `"q8"`, `"q4"`, or `"q4f16"`. Pass `NULL` for the default `"q4"`. |
+| `model_variant` | Which variant to load: `"q4"` or `"q8"`. Pass `NULL` for the default `"q4"`. `"fp32"`, `"fp16"`, and `"q4f16"` are no longer supported. |
 
 **Returns:** A non-negative embedding model handle on success, or a negative error code on failure. Convert the code with `moonshine_error_to_string()`.
 
@@ -690,7 +701,7 @@ int32_t moonshine_create_embedding_model_from_memory(
 | Argument | Description |
 | --- | --- |
 | `model_arch` | One of the `MOONSHINE_EMBEDDING_MODEL_ARCH_*` constants. |
-| `model_variant` | Which variant to load (`"fp32"`, `"fp16"`, `"q8"`, `"q4"`, `"q4f16"`; `NULL` defaults to `"q4"`). Only used to pick the model file when the filename keys leave it ambiguous. |
+| `model_variant` | Which variant to load (`"q4"`, `"q8"`; `NULL` defaults to `"q4"`). `"fp32"`, `"fp16"`, and `"q4f16"` are no longer supported. Only used to pick the model file when the filename keys leave it ambiguous. |
 | `filenames` | Canonical asset filenames, as listed by `moonshine_get_embedding_dependencies()` (for example `model_q4.ort` and `tokenizer.bin`). |
 | `filenames_count` | Number of entries in `filenames`, `memory`, and `memory_sizes`. |
 | `memory` | Asset bytes for each filename. Copied by the library, so the buffers only need to stay valid for this call. |
@@ -857,7 +868,7 @@ int32_t moonshine_create_tts_synthesizer_from_files(
 
 Creates a text to speech synthesizer from memory.
 
-`filenames[i]` is the canonical `MoonshineTTSOptions::files` key (e.g. `kokoro/model.ort`, `kokoro/config.json`, `kokoro/voices/af_heart.kokorovoice`, `piper/onnx`, `piper/onnx.json`, `zipvoice/text_encoder.ort`, `zipvoice/fm_decoder.ort`, `zipvoice/vocoder.ort`, `zipvoice/tokens.txt`, `zipvoice/model.json`). For ZipVoice a caller-supplied reference clip is passed as key `zipvoice/clone_audio` (raw little-endian float32 mono PCM); set `zipvoice_clone_sample_rate` and, optionally, `zipvoice_clone_transcript`. When the transcript is omitted, supply `clone_asr/<stt-filename>` keys (from the ZipVoice TTS dependency `clone_asr` group) so the library can refine and auto-transcribe the clip with its owned ASR. When `memory[i]` is non-NULL and `memory_sizes[i]` > 0, that buffer is used as the asset bytes; the library does not copy it—keep the buffers valid until `moonshine_free_tts_synthesizer()`. When `memory[i]` is NULL or `memory_sizes[i]` is zero, the key string is also used as a path relative to `g2p_options.g2p_root` (from `options`), same as path-only map entries.
+`filenames[i]` is the canonical `MoonshineTTSOptions::files` key (e.g. `kokoro/prosody.model.ort`, `kokoro/prosody.weights.ort`, `kokoro/decoder.model.ort`, `kokoro/decoder.weights.ort`, `kokoro/config.json`, `kokoro/voices/af_heart.kokorovoice`, `piper/onnx`, `piper/onnx.json`, `zipvoice/text_encoder.ort`, `zipvoice/fm_decoder.ort`, `zipvoice/vocoder.ort`, `zipvoice/tokens.txt`, `zipvoice/model.json`). For ZipVoice a caller-supplied reference clip is passed as key `zipvoice/clone_audio` (raw little-endian float32 mono PCM); set `zipvoice_clone_sample_rate` and, optionally, `zipvoice_clone_transcript`. When the transcript is omitted, supply `clone_asr/<stt-filename>` keys (from the ZipVoice TTS dependency `clone_asr` group) so the library can refine and auto-transcribe the clip with its owned ASR. When `memory[i]` is non-NULL and `memory_sizes[i]` > 0, that buffer is used as the asset bytes; the library does not copy it—keep the buffers valid until `moonshine_free_tts_synthesizer()`. When `memory[i]` is NULL or `memory_sizes[i]` is zero, the key string is also used as a path relative to `g2p_options.g2p_root` (from `options`), same as path-only map entries.
 
 Other `options` are parsed like `moonshine_create_tts_synthesizer_from_files()`.
 
@@ -961,6 +972,78 @@ int32_t moonshine_phonemes_to_speech(
 
 **Returns:** Zero on success, or a non-zero error code on failure.
 
+### Streaming synthesis
+
+The functions above return a whole utterance at once, which means nothing is audible until all of it exists. A stream turns that around: text goes in as it becomes available, and audio comes out in chunks.
+
+The design is deliberately synchronous and pull-based. `moonshine_tts_next_chunk()` never waits on another thread; it blocks only while it is computing, and returns immediately when there is nothing to do. Threading, callbacks and events belong to the bindings, which is where the platform's conventions live.
+
+There is no stream object. A synthesizer has one model and speaks one thing at a time, so the streaming calls act on the synthesizer itself: pushing text starts a generation, ending input finishes it, and there is nothing to create or free.
+
+```c
+struct tts_chunk_t {
+  const float *audio_data;
+  uint64_t     audio_data_count;
+  int32_t      sample_rate;
+  const char  *text;
+  uint64_t     utterance_id;
+  int8_t       is_final;
+};
+
+int32_t moonshine_tts_push_text(int32_t tts_synthesizer_handle, const char *text);
+int32_t moonshine_tts_flush(int32_t tts_synthesizer_handle);
+int32_t moonshine_tts_end_input(int32_t tts_synthesizer_handle);
+int32_t moonshine_tts_cancel(int32_t tts_synthesizer_handle);
+int32_t moonshine_tts_is_streaming(int32_t tts_synthesizer_handle);
+int32_t moonshine_tts_next_chunk(int32_t tts_synthesizer_handle, uint32_t flags,
+                                 const struct tts_chunk_t **out_chunk);
+```
+
+`moonshine_tts_push_text()` appends text. It is buffered rather than synthesized, because prosody depends on knowing where a clause ends; a synthesizer fed one word at a time produces a list, not a sentence. Buffered text becomes synthesizable when it forms a complete unit under the same rules as `moonshine_tts_split_utterances()`.
+
+`moonshine_tts_flush()` makes whatever is buffered synthesizable even if it is not a complete sentence, for a caller who knows no more text is coming for now. `moonshine_tts_end_input()` flushes and marks the generation closed to further text, after which `moonshine_tts_next_chunk()` reports end of stream once the queue drains. `moonshine_tts_cancel()` throws away both buffered text and pending audio; it is safe to call when nothing is streaming.
+
+Because one generation occupies the model, `moonshine_text_to_speech()` returns `MOONSHINE_ERROR_BUSY` while one is in flight. Finish it or cancel it first. `moonshine_tts_is_streaming()` reports whether one is running.
+
+`moonshine_tts_next_chunk()` returns one of four things:
+
+| Return | Meaning |
+| --- | --- |
+| `MOONSHINE_ERROR_NONE` | `*out_chunk` points at a chunk of audio. |
+| `MOONSHINE_TTS_NEED_TEXT` | Nothing complete is buffered. Push more text, or flush. |
+| `MOONSHINE_TTS_END_OF_STREAM` | Input ended and everything buffered has been returned. |
+| `MOONSHINE_TTS_CANCELLED` | A cancel discarded the reply. Sent once, and only when there was something to discard, so a caller that cancels defensively never sees a phantom interruption. |
+
+The cancelled status exists because whoever cancels is usually not the thread pulling chunks: without it, an interrupted reply is indistinguishable from one that merely ran out of text.
+
+Chunk memory is owned by the synthesizer and stays valid until the next call on it, the same convention `transcript_t` uses rather than the malloc-and-free convention of batch synthesis. Do not free it. `utterance_id` numbers utterances from one, and `is_final` marks the last chunk of each.
+
+Chunks are at most one utterance, as `moonshine_tts_split_utterances()` would divide the text. Kokoro cuts within an utterance as well, so a long sentence starts playing before all of it has been decoded; chunks grow as the utterance goes on, since a short first chunk buys a fast start while later ones give the decoder enough context to keep the level and prosody steady.
+
+### `moonshine_tts_split_utterances()`
+
+Splits text into the units a synthesizer would speak separately, which is also what a stream buffers towards. Exposed because callers doing their own queueing need the same rules the streaming path uses, rather than a private reimplementation that disagrees about `Dr.` or `。`.
+
+```c
+int32_t moonshine_tts_split_utterances(
+    const char *text,
+    const struct moonshine_option_t *options,
+    uint64_t options_count,
+    char **out_utterances_json
+);
+```
+
+| Argument | Description |
+| --- | --- |
+| `text` | UTF-8 text to split. |
+| `options` | Accepts `language` (for language-specific abbreviations), `split_on_colon` and `min_codepoints`. |
+| `options_count` | Number of entries in `options`. |
+| `out_utterances_json` | Receives a NUL-terminated JSON array of strings. Release with `moonshine_free_buffer()`. |
+
+The splitter keeps abbreviations and initials whole (`Dr. Smith`, `J. R. R. Tolkien`, `3.14`), recognizes the terminators of scripts that do not use a full stop (`。！？؟۔।॥;·`) without requiring whitespace after them, and does not split inside quotes or brackets. It biases towards fewer, longer units, because a synthesizer given more context produces better prosody.
+
+**Returns:** `MOONSHINE_ERROR_NONE` on success, or a non-zero error code on failure.
+
 ### `moonshine_get_tts_dependencies()`
 
 Returns merged G2P + TTS vocoder download dependencies as a JSON object with a `groups` array (same shape as `moonshine_get_stt_dependencies()`). Each group is `{ "base_url", "files": [{name,url,size,checksum,checksum_type}] }`. `languages` is comma-separated; empty or NULL means all known languages. `options` / `options_count`: same [TTS options](options.md#text-to-speech) as synthesizer create (`voice`, `g2p_root`, and related).
@@ -991,7 +1074,7 @@ int32_t moonshine_get_tts_dependencies(
 
 Returns known TTS voices for the requested languages with availability state. `languages` is comma-separated; empty or NULL means all registered catalog languages (same tag set as G2P dependencies) that have a resolved TTS layout. `options` / `options_count`: [TTS options](options.md#text-to-speech) used for listing (`voice` selects vocoder catalog; set `g2p_root` / aliases for accurate found/missing). The `voice` option does not filter the returned list.
 
-On success, `*out_voices_json` is a NUL-terminated JSON object mapping each language tag to a JSON array of objects `{"id":"<voice>","state":"found"}` or `{"id":"<voice>","state":"missing"}`. Voice ids are prefixed with `kokoro_` or `piper_`. Kokoro uses the upstream Kokoro-82M voice id catalog plus any extra `*.kokorovoice` in the bundle; Piper lists the language default voice stem plus every voice in the resolved voices directory, in either shipped form (`<stem>.ort`, or the split `<stem>.model.ort` plus `<stem>.weights.ort` pair). `found` means the asset is on disk or supplied via the in-memory file map like `MoonshineTTS`. Free with `moonshine_free_buffer()`.
+On success, `*out_voices_json` is a NUL-terminated JSON object mapping each language tag to a JSON array of objects `{"id":"<voice>","state":"found"}` or `{"id":"<voice>","state":"missing"}`. Voice ids are prefixed with `kokoro_` or `piper_`. Kokoro uses the upstream Kokoro-82M voice id catalog plus any extra `*.kokorovoice` in the bundle; Piper lists the language default voice stem plus every voice in the resolved voices directory, by the stem of its two stages (each of which is a single `<stem>.<stage>.ort`, or a split `<stem>.<stage>.model.ort` plus `<stem>.<stage>.weights.ort` pair). `found` means the asset is on disk or supplied via the in-memory file map like `MoonshineTTS`. Free with `moonshine_free_buffer()`.
 
 ```c
 int32_t moonshine_get_tts_voices(

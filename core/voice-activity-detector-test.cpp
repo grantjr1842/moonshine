@@ -1,6 +1,8 @@
 #include "voice-activity-detector.h"
 
+#include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 #include "debug-utils.h"
@@ -118,6 +120,37 @@ TEST_CASE("voice-activity-detector-test") {
     vad.start();
     vad.stop();
     REQUIRE(vad.get_segments()->empty());
+  }
+  SUBCASE("vad-flush-after-deactivate") {
+    std::string wav_path = "two_cities.wav";
+    REQUIRE(std::filesystem::exists(wav_path));
+    float *wav_data = nullptr;
+    size_t wav_data_size = 0;
+    int32_t wav_sample_rate = 0;
+    REQUIRE(load_wav_data(wav_path.c_str(), &wav_data, &wav_data_size,
+                          &wav_sample_rate));
+    REQUIRE(wav_data != nullptr);
+    REQUIRE(wav_data_size > 1);
+    // load_wav_data hands back a raw C-allocated buffer; adopt it in a
+    // unique_ptr with a std::free deleter so it is released on every path
+    // without a bare deallocation call (see STYLE_GUIDE.md).
+    std::unique_ptr<float, decltype(&std::free)> owned(wav_data, &std::free);
+
+    const size_t first_half = wav_data_size / 2;
+    VoiceActivityDetector vad;
+    vad.start();
+    vad.process_audio(wav_data, first_half, wav_sample_rate);
+    vad.deactivate();
+    REQUIRE_FALSE(vad.is_active());
+    vad.flush(wav_data + first_half, wav_data_size - first_half,
+              wav_sample_rate);
+    REQUIRE_FALSE(vad.is_active());
+    const std::vector<VoiceActivitySegment> *segments = vad.get_segments();
+    REQUIRE(segments->size() >= 1);
+    for (const VoiceActivitySegment &segment : *segments) {
+      REQUIRE(segment.is_complete);
+      REQUIRE(segment.audio_data.size() > 0);
+    }
   }
   SUBCASE("vad-threshold-0") {
     VoiceActivityDetector vad(0.0f);

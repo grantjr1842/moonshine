@@ -8,7 +8,7 @@ A fast, accurate, on-device AI library for building interactive voice applicatio
 pip install moonshine-voice
 ```
 
-Training a LoRA domain adapter is an opt-in extra (`pip install 'moonshine-voice[lora]'`) so the inference install does not pull in PyTorch or Transformers. See [Domain Customization](https://moonshine-voice.readthedocs.io/en/latest/models/domain-customization/#retraining).
+Training a domain adapter is an opt-in extra (`pip install 'moonshine-voice[finetune]'`, also available as `[lora]`) so the inference install does not pull in PyTorch or Transformers. See [Domain Customization](https://moonshine-voice.readthedocs.io/en/latest/models/domain-customization/#retraining).
 
 ## Quick Start
 
@@ -258,4 +258,4 @@ For more information, see the [main Moonshine Voice documentation](https://githu
 
 ## License
 
-The code and English-language models are released under the MIT License - see the main project repository for details. The models used for other languages are released under the [Moonshine Community License](https://www.moonshine.ai/license).
+The code and the models are released under the MIT License by default, in every language and at every size - see the main project repository for details. The only exceptions are the legacy non-streaming models for languages other than English, which stay under the non-commercial [Moonshine Community License](https://www.moonshine.ai/license); that list is enumerated in the project LICENSE.

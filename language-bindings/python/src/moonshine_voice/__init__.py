@@ -68,7 +68,7 @@ from moonshine_voice.utils import (
     load_wav_file,
 )
 
-__version__ = "0.1.3"
+__version__ = "0.1.5"
 
 # Lazy imports to avoid RuntimeWarning when running modules as scripts
 # These will be imported on first access via __getattr__
@@ -77,6 +77,7 @@ _mic_transcriber_imported = False
 _alphanumeric_listener_imported = False
 _tts_imported = False
 _g2p_imported = False
+_embedding_imported = False
 _agent_flow_imported = False
 
 
@@ -84,7 +85,7 @@ def __getattr__(name):
     """Lazy import for the transcriber, mic_transcriber, and TTS modules."""
     global _transcriber_imported, _mic_transcriber_imported
     global _alphanumeric_listener_imported, _tts_imported, _g2p_imported
-    global _agent_flow_imported
+    global _embedding_imported, _agent_flow_imported
 
     # Lazy import transcriber module
     if name in (
@@ -127,6 +128,14 @@ def __getattr__(name):
             _transcriber_imported = True
         return globals()[name]
 
+    if name == "EmbeddingModel":
+        if not _embedding_imported:
+            from moonshine_voice.embedding_model import EmbeddingModel
+
+            globals()["EmbeddingModel"] = EmbeddingModel
+            _embedding_imported = True
+        return globals()[name]
+
     # Lazy import mic_transcriber module
     if name == "MicTranscriber":
         if not _mic_transcriber_imported:
@@ -137,14 +146,30 @@ def __getattr__(name):
         return globals()[name]
 
     # Lazy import TTS / G2P
-    if name in ("TextToSpeech", "VoiceClone", "list_output_devices"):
+    if name in (
+        "TextToSpeech",
+        "TtsChunk",
+        "SpeechInProgress",
+        "VoiceClone",
+        "list_output_devices",
+        "split_say_utterances",
+    ):
         if not _tts_imported:
-            from moonshine_voice.tts import TextToSpeech, list_output_devices
+            from moonshine_voice.tts import (
+                TextToSpeech,
+                SpeechInProgress,
+                TtsChunk,
+                list_output_devices,
+                split_say_utterances,
+            )
             from moonshine_voice.voice_clone import VoiceClone
 
             globals()["TextToSpeech"] = TextToSpeech
+            globals()["TtsChunk"] = TtsChunk
+            globals()["SpeechInProgress"] = SpeechInProgress
             globals()["VoiceClone"] = VoiceClone
             globals()["list_output_devices"] = list_output_devices
+            globals()["split_say_utterances"] = split_say_utterances
             _tts_imported = True
         return globals()[name]
 
@@ -204,6 +229,7 @@ def __getattr__(name):
         "Dialog",
         "Prompt",
         "Say",
+        "SayStream",
         "Ask",
         "Confirm",
         "Choose",
@@ -226,6 +252,7 @@ def __getattr__(name):
                 Dialog,
                 Prompt,
                 Say,
+                SayStream,
                 Ask,
                 Confirm,
                 Choose,
@@ -247,6 +274,7 @@ def __getattr__(name):
             globals()["Dialog"] = Dialog
             globals()["Prompt"] = Prompt
             globals()["Say"] = Say
+            globals()["SayStream"] = SayStream
             globals()["Ask"] = Ask
             globals()["Confirm"] = Confirm
             globals()["Choose"] = Choose
@@ -284,6 +312,7 @@ __all__ = [
     "LineSpeakersChanged",
     "LineCompleted",
     "Error",
+    "EmbeddingModel",
     "EmbeddingModelArch",
     "MoonshineError",
     "MoonshineUnknownError",
@@ -313,8 +342,11 @@ __all__ = [
     "get_diarization_model",
     # TTS / G2P
     "TextToSpeech",
+    "TtsChunk",
+    "SpeechInProgress",
     "VoiceClone",
     "list_output_devices",
+    "split_say_utterances",
     "GraphemeToPhonemizer",
     "TTS_CDN_BASE_URL",
     "tts_asset_cache_path",
@@ -347,6 +379,7 @@ __all__ = [
     "Dialog",
     "Prompt",
     "Say",
+    "SayStream",
     "Ask",
     "Confirm",
     "Choose",

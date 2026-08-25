@@ -12,6 +12,7 @@
 #   - move or push the v<version> tag
 #   - upload to PyPI, Maven Central or GitHub Releases
 #   - publish the Swift package (scripts/publish-swift.sh is skipped entirely)
+#   - tag moonshine-ai/moonshine-voice-assets with v<version>
 #   - fast-forward main or delete the candidate branch (finish-release is skipped)
 #
 # The Android stage uses publishToMavenLocal instead of publishAndReleaseToMaven-
@@ -786,9 +787,9 @@ main() {
     # an empty test-assets tree. Prefer a fast copy from the main checkout when
     # those files are already present; otherwise fetch into the worktree.
     if [[ ! -f "${RELEASE_DIR}/test-assets/tiny-en/encoder_model.ort" ]] || \
-       [[ ! -f "${RELEASE_DIR}/core/moonshine-tts/data/kokoro/model.ort" ]]; then
+       [[ ! -f "${RELEASE_DIR}/core/moonshine-tts/data/kokoro/prosody.model.ort" ]]; then
         if [[ -f "${REPO_ROOT_DIR}/test-assets/tiny-en/encoder_model.ort" ]] && \
-           [[ -f "${REPO_ROOT_DIR}/core/moonshine-tts/data/kokoro/model.ort" ]]; then
+           [[ -f "${REPO_ROOT_DIR}/core/moonshine-tts/data/kokoro/prosody.model.ort" ]]; then
             echo "Copying voice assets from main checkout into release worktree..."
             # test-assets: copy gitignored model blobs the tracked tree lacks.
             mkdir -p "${RELEASE_DIR}/test-assets"
@@ -865,7 +866,9 @@ main() {
     # MOBILE_LATENCY_OPTIONAL=1 to skip when hardware is absent. Does not rewrite
     # the README here (this is a disposable worktree) -- refresh figures with
     # scripts/test-mobile-latency.sh --update-readme on the candidate branch.
-    run_stage test-mobile-latency scripts/test-mobile-latency.sh --skip-build-swift
+    # --skip-ios: this Mac has no signed-in Xcode Apple ID, so on-device
+    # iOS signing fails. macOS + Android latency still run.
+    run_stage test-mobile-latency scripts/test-mobile-latency.sh --skip-build-swift --skip-ios
     run_stage build-android      scripts/build-android.sh "${ANDROID_ARGS[@]}"
     run_stage build-pip          scripts/build-pip.sh "${UPLOAD_ARGS[@]}"
     run_stage build-pip-docker   scripts/build-pip-docker.sh "${UPLOAD_ARGS[@]}"
@@ -888,6 +891,15 @@ main() {
              "left alone."
         echo "Ship it with: scripts/build-all-platforms.sh ${RELEASE_REF} publish"
         return 0
+    fi
+
+    # Snapshot the HF asset mirror at this version before main advances, so a
+    # later checkout of the tag still fetches the files this release shipped
+    # against. Skipped on dry runs (run_publish_stage) and left alone if the
+    # tag already exists.
+    if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        run_publish_stage tag-hf-voice-assets \
+            scripts/tag-hf-voice-assets.sh
     fi
 
     # Everything is published, so main can now advance to what shipped. This is

@@ -42,14 +42,24 @@ model; in short there are three layouts:
 
 | Layout | Used by | Why |
 |--------|---------|-----|
-| `<stem>.model.ort` + `<stem>.weights.ort` | every Piper voice with int8 weights | Keeping the weights in a second model runs their dequantize once at load instead of on every inference, without the ~4x file growth that folding them to float32 would cause. See `scripts/split-model-weights.py`. |
-| `<stem>.ort` | Kokoro, the English OOV model, `en_US-saikat` | Float weights, so full optimization costs almost nothing in size. |
+| `<stem>.model.ort` + `<stem>.weights.ort` | Kokoro, every Piper voice with int8 weights | Keeping the weights in a second model runs their dequantize once at load instead of on every inference, without the ~4x file growth that folding them to float32 would cause. See `scripts/split-model-weights.py`. |
+| `<stem>.ort` | the English OOV model, `en_US-saikat` | Float weights, so full optimization costs almost nothing in size. |
 | `<stem>.onnx` | the Chinese and Arabic G2P transformers | Their weights feed `MatMul`, which ORT pre-packs at load only for a constant operand, so moving the weights out of the graph would cost about 2.2x on inference. |
 
 Piper voices keep their `<stem>.onnx.json` config under that name whatever form
 the model takes. The original `.onnx` files are no longer in the tree but remain
 on the CDN under `https://download.moonshine.ai/tts/`, which is where to get one
 if you need to re-run a conversion or compare against upstream `piper-tts`.
+
+Each Piper voice is cut in two before that conversion, so what ships is
+`<stem>.upstream.*`, which turns phonemes into acoustic frames, and
+`<stem>.generator.*`, which turns frames into audio. Each half takes whichever
+layout above suits it. The pair costs the same total bytes and renders a whole
+utterance about as fast as the single model, so nothing is given up by carrying
+only the stages, and asking the generator for a range of frames is what lets a
+reply start playing before it has been synthesized. `scripts/split-piper-stages.py`
+makes the cut and `scripts/build-piper-stages.py` drives it over every voice,
+installing a pair only once it reproduces the shipped model sample for sample.
 
 ## Regeneration verification (2026-03-30)
 

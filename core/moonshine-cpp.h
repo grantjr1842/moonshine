@@ -573,7 +573,8 @@ class Transcriber {
   /// Initialize a transcriber from in-memory model buffers keyed by their
   /// canonical filename (matching the download manifest, e.g.
   /// ``encoder_model.ort`` / ``decoder_model_merged.ort`` / ``tokenizer.bin``
-  /// for non-streaming models, or ``frontend.ort`` / ``encoder.ort`` /
+  /// for non-streaming models, or ``frontend.ort`` (or
+  /// ``frontend.model.ort`` + ``frontend.weights.ort``) / ``encoder.ort`` /
   /// ``adapter.ort`` / ``cross_kv.ort`` / ``decoder_kv.ort`` /
   /// ``streaming_config.json`` / ``tokenizer.bin`` for streaming models). This
   /// is the general in-memory loader: unlike the fixed encoder/decoder overload
@@ -917,7 +918,9 @@ class TextToSpeech {
   TextToSpeech(const std::string &language, const Options &options = {});
 
   /// Create a TTS synthesizer from in-memory assets keyed by their canonical
-  /// filename (``kokoro/model.ort``, ``kokoro/config.json``, ``piper/onnx``,
+  /// filename (``kokoro/prosody.model.ort``, ``kokoro/prosody.weights.ort``,
+  /// ``kokoro/decoder.model.ort``, ``kokoro/decoder.weights.ort``,
+  /// ``kokoro/config.json``, ``piper/onnx``,
   /// ``zipvoice/text_encoder.ort`` and so on; see
   /// ``moonshine_create_tts_synthesizer_from_memory``). Keys with no buffer
   /// are resolved as paths under ``g2p_root`` instead, so a caller can supply
@@ -1537,6 +1540,15 @@ inline MemoryFiles flattenFiles(
   return out;
 }
 
+inline void rejectRemovedEmbeddingVariant(const std::string &variant) {
+  if (variant == "fp32" || variant == "fp16" || variant == "q4f16") {
+    throw MoonshineException(
+        "The \"" + variant +
+        "\" embedding model variant is no longer supported. "
+        "Use \"q4\" (the default) or \"q8\".");
+  }
+}
+
 }  // namespace detail
 
 inline Transcriber::Transcriber(const std::string &modelPath,
@@ -2121,8 +2133,10 @@ inline void TextToSpeech::cloneFrom(const std::vector<float> &samples,
                                     int32_t sampleRate,
                                     const std::string &transcript) {
   const std::vector<float> clip = clipForCloning(samples, sampleRate);
-  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(clip.data());
-  cloneBytes_.assign(bytes, bytes + clip.size() * sizeof(float));
+  cloneBytes_.resize(clip.size() * sizeof(float));
+  if (!cloneBytes_.empty()) {
+    std::memcpy(cloneBytes_.data(), clip.data(), cloneBytes_.size());
+  }
   // extractSpeechClip always resamples to 16 kHz, whatever went in.
   rebuildForClone(VoiceClone::CLIP_SAMPLE_RATE, transcript);
 }
@@ -2135,8 +2149,10 @@ inline void TextToSpeech::cloneFrom(const VoiceClone &clone,
         "That VoiceClone has not captured enough speech yet; wait for "
         "isReady(), or call finish() to take the best window so far.");
   }
-  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(clip.data());
-  cloneBytes_.assign(bytes, bytes + clip.size() * sizeof(float));
+  cloneBytes_.resize(clip.size() * sizeof(float));
+  if (!cloneBytes_.empty()) {
+    std::memcpy(cloneBytes_.data(), clip.data(), cloneBytes_.size());
+  }
   std::string resolved = transcript;
   if (resolved.empty()) {
     resolved = clone.transcript();
@@ -2280,6 +2296,7 @@ inline EmbeddingModel::EmbeddingModel(const std::string &model_path,
                                       EmbeddingModelArch arch,
                                       const std::string &model_variant)
     : handle_(-1) {
+  detail::rejectRemovedEmbeddingVariant(model_variant);
   handle_ = moonshine_create_embedding_model(
       model_path.c_str(), static_cast<uint32_t>(arch), model_variant.c_str());
   checkError(handle_);
@@ -2288,6 +2305,7 @@ inline EmbeddingModel::EmbeddingModel(const std::string &model_path,
 inline EmbeddingModel EmbeddingModel::loadFromMemory(
     const std::map<std::string, std::pair<const uint8_t *, size_t>> &modelFiles,
     EmbeddingModelArch arch, const std::string &model_variant) {
+  detail::rejectRemovedEmbeddingVariant(model_variant);
   detail::MemoryFiles files = detail::flattenFiles(modelFiles);
   int32_t handle = moonshine_create_embedding_model_from_memory(
       static_cast<uint32_t>(arch),

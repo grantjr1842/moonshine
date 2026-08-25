@@ -23,6 +23,16 @@
 #define MOONSHINE_MAX_AUDIO_CHUNK_LEN 16384
 #endif
 
+/// A float32 weight tensor dequantized once at load and supplied as a graph
+/// input on every frontend run. Used when the frontend ships as
+/// ``frontend.model.ort`` + ``frontend.weights.ort``; see
+/// ``scripts/split-model-weights.py``.
+struct FrontendSplitWeight {
+  std::string name;
+  std::vector<int64_t> shape;
+  std::vector<float> data;
+};
+
 /* Streaming model configuration (matches streaming_config.json) */
 struct MoonshineStreamingConfig {
   int encoder_dim;      /* Encoder hidden dimension (320) */
@@ -110,13 +120,19 @@ struct MoonshineStreamingModel {
 
   MoonshineStreamingConfig config;
 
-  // Memory-mapped data (if loaded from files)
+  // Memory-mapped data (if loaded from files). These must outlive the matching
+  // OrtSession: CreateSessionFromArray reads the bytes in place. Locals that
+  // go out of scope after load leak the mapping (see GitHub issue #216).
   const char *frontend_mmapped_data = nullptr;
   size_t frontend_mmapped_data_size = 0;
   const char *encoder_mmapped_data = nullptr;
   size_t encoder_mmapped_data_size = 0;
   const char *adapter_mmapped_data = nullptr;
   size_t adapter_mmapped_data_size = 0;
+  const char *cross_kv_mmapped_data = nullptr;
+  size_t cross_kv_mmapped_data_size = 0;
+  const char *decoder_kv_mmapped_data = nullptr;
+  size_t decoder_kv_mmapped_data_size = 0;
 
   std::string last_result;
 
@@ -138,6 +154,11 @@ struct MoonshineStreamingModel {
   int load(const char *model_dir, const char *tokenizer_path,
            int32_t model_type);
 
+  // Releases the current decoder_kv session (and its file mapping, if any) and
+  // loads a replacement from ``path``. Used to swap in
+  // decoder_kv_with_attention.ort when word timestamps are requested.
+  int replace_decoder_kv_from_path(const char *path);
+
   // Parses a streaming_config.json payload (from disk or an in-memory buffer)
   // into ``this->config``. Exposed so the transcriber's in-memory load path can
   // populate the config before calling ``load_from_memory``.
@@ -150,7 +171,9 @@ struct MoonshineStreamingModel {
       const uint8_t *cross_kv_model_data, size_t cross_kv_model_data_size,
       const uint8_t *decoder_kv_model_data, size_t decoder_kv_model_data_size,
       const uint8_t *tokenizer_data, size_t tokenizer_data_size,
-      const MoonshineStreamingConfig &config, int32_t model_type);
+      const MoonshineStreamingConfig &config, int32_t model_type,
+      const uint8_t *frontend_weights_data = nullptr,
+      size_t frontend_weights_data_size = 0);
 
 #if defined(ANDROID)
   int load_from_assets(const char *model_dir, const char *tokenizer_path,
@@ -218,6 +241,14 @@ struct MoonshineStreamingModel {
 
   /* Compute cross-attention K/V from current memory state */
   int compute_cross_kv(MoonshineStreamingState *state);
+
+  // Populated when the frontend ships as a split ORT pair. Empty means the
+  // frontend session already has its weights baked in (``frontend.ort``).
+  std::vector<FrontendSplitWeight> frontend_split_weights;
+
+  int load_frontend_split_weights_from_memory(const uint8_t *data, size_t size);
+  int load_frontend_split_weights_from_path(const char *path);
+  int collect_frontend_split_weights(OrtSession *weights_session);
 };
 
 #endif

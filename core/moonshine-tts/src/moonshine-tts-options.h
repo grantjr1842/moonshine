@@ -22,7 +22,34 @@ using MoonshineTTSFileInformation = FileInformation;
 /// Every model key below names a ``.ort``. Moonshine loads ORT-format models
 /// only: the wasm and mobile runtimes are minimal ONNX Runtime builds with no
 /// ONNX parser compiled in, so a ``.onnx`` cannot be read there at all.
+/// Anchor for the Kokoro model, naming the voice rather than a file that has
+/// to exist. Kokoro ships as the split pair below, and this key still selects
+/// it: the engine derives both halves from whatever path or directory the
+/// caller points this at. A single ``.ort`` at this exact path is also loaded,
+/// which is what a caller passing their own model gets.
 inline constexpr std::string_view kTtsKokoroModelKey = "kokoro/model.ort";
+/// The fused Kokoro graph, carrying no weight data. See split-weights.h.
+inline constexpr std::string_view kTtsKokoroSplitModelKey =
+    "kokoro/model.model.ort";
+/// The int8 Kokoro weights plus their dequantize chains, run once at load.
+inline constexpr std::string_view kTtsKokoroSplitWeightsKey =
+    "kokoro/model.weights.ort";
+/// Kokoro cut in two, so streaming can decode a slice at a time.
+///
+/// The prosody stage turns phonemes into frame-rate features and runs once per
+/// utterance; the decoder turns a range of those frames into audio and runs
+/// once per chunk. Each half is weight-split the same way the whole graph is,
+/// so there are four files. Together they are the same size as the single pair
+/// and render identical audio; when they are absent the engine falls back to
+/// the whole-utterance model above.
+inline constexpr std::string_view kTtsKokoroProsodyModelKey =
+    "kokoro/prosody.model.ort";
+inline constexpr std::string_view kTtsKokoroProsodyWeightsKey =
+    "kokoro/prosody.weights.ort";
+inline constexpr std::string_view kTtsKokoroDecoderModelKey =
+    "kokoro/decoder.model.ort";
+inline constexpr std::string_view kTtsKokoroDecoderWeightsKey =
+    "kokoro/decoder.weights.ort";
 inline constexpr std::string_view kTtsKokoroConfigJsonKey =
     "kokoro/config.json";
 /// Optional explicit Piper model, in ORT format.
@@ -93,6 +120,22 @@ struct MoonshineTTSOptions {
   float output_volume = 1.F;
   std::optional<float> piper_noise_scale_override{};
   std::optional<float> piper_noise_w_override{};
+
+  /// How `MoonshineTTS::create_stream` cuts an utterance into audio chunks.
+  ///
+  /// Only Kokoro, and only where its prosody/decoder stages are installed, can
+  /// cut inside a sentence; every other configuration streams a sentence at a
+  /// time and ignores these. Defaults come from `ChunkPolicyOptions`, which
+  /// documents what each one trades away.
+  ///
+  /// `stream_growth` is the one worth understanding: chunks get longer as an
+  /// utterance goes on, because only the first chunk delays playback while
+  /// short chunks are what make the decoder's normalisation drift. Setting it
+  /// to 1 gives a uniform grid.
+  float stream_first_chunk_seconds = 0.6F;
+  float stream_tolerance_seconds = 0.2F;
+  float stream_crossfade_seconds = 0.025F;
+  float stream_growth = 2.0F;
 
   /// ZipVoice controls (used only when the ``zipvoice`` vocoder is selected).
   /// ``num_step`` <= 0 and

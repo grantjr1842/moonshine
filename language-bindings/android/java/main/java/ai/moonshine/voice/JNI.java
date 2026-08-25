@@ -5,6 +5,8 @@ public class JNI {
     public static final int MOONSHINE_ERROR_UNKNOWN = -1;
     public static final int MOONSHINE_ERROR_INVALID_HANDLE = -2;
     public static final int MOONSHINE_ERROR_INVALID_ARGUMENT = -3;
+    /** A streaming generation is in flight; finish it or cancel it first. */
+    public static final int MOONSHINE_ERROR_BUSY = -4;
 
     public static final int MOONSHINE_MODEL_ARCH_TINY = 0;
     public static final int MOONSHINE_MODEL_ARCH_BASE = 1;
@@ -24,7 +26,7 @@ public class JNI {
     public static final int MOONSHINE_FLAG_SPELLING_MODE = 1 << 1;
 
     /** Embedding model architecture (Gemma 300M). */
-    static final int MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M = 0;
+    public static final int MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M = 0;
 
     /** Pass to TTS/G2P create calls; must match native {@code moonshine-c-api.h}. */
     public static final int MOONSHINE_HEADER_VERSION = 30000;
@@ -99,23 +101,20 @@ public class JNI {
     public static native int moonshineStreamAcknowledgeRevision(
             int transcriber_handle, int stream_handle, long observed_revision);
 
-    // Text embeddings back AgentFlow's phrase matching and are not part of the
-    // library's public surface, so these stay package-private.
-
-    static native int moonshineCreateEmbeddingModel(String model_path,
+    public static native int moonshineCreateEmbeddingModel(String model_path,
             int embedding_model_arch, String model_variant);
 
-    static native void moonshineFreeEmbeddingModel(int embedding_model_handle);
+    public static native void moonshineFreeEmbeddingModel(int embedding_model_handle);
 
     /** Returns null on failure. */
-    static native float[] moonshineCalculateEmbedding(int embedding_model_handle,
+    public static native float[] moonshineCalculateEmbedding(int embedding_model_handle,
             String sentence);
 
     /**
      * Cosine similarity of two equal-length embeddings, in {@code [-1, 1]}.
      * Returns 0 when the arrays are null, empty, or of differing lengths.
      */
-    static native float moonshineCalculateEmbeddingDistance(int embedding_model_handle,
+    public static native float moonshineCalculateEmbeddingDistance(int embedding_model_handle,
             float[] embedding_a, float[] embedding_b);
 
     public static native int moonshineCreateTtsSynthesizerFromFiles(String language,
@@ -156,7 +155,7 @@ public class JNI {
      *                  {@code null} for the default model.
      * @param options   Optional options; recognizes {@code variant}.
      */
-    static native String moonshineGetEmbeddingDependencies(String modelName,
+    public static native String moonshineGetEmbeddingDependencies(String modelName,
             TranscriberOption[] options);
 
     /**
@@ -183,6 +182,24 @@ public class JNI {
 
     public static native TtsSynthesisResult moonshinePhonemesToSpeech(int tts_synthesizer_handle,
             String phonemes, TranscriberOption[] options);
+
+    /** JSON array of the utterances a streaming synthesizer would speak one at a time. */
+    public static native String moonshineTtsSplitUtterances(String language, String text,
+            TranscriberOption[] options);
+
+    public static native int moonshineTtsPushText(int tts_synthesizer_handle, String text);
+
+    public static native int moonshineTtsFlush(int tts_synthesizer_handle);
+
+    public static native int moonshineTtsEndInput(int tts_synthesizer_handle);
+
+    public static native int moonshineTtsCancel(int tts_synthesizer_handle);
+
+    /** Non-zero while a streaming generation is in flight. */
+    public static native int moonshineTtsIsStreaming(int tts_synthesizer_handle);
+
+    /** Never null on success; check {@link TtsChunk#status} for the native status code. */
+    public static native TtsChunk moonshineTtsNextChunk(int tts_synthesizer_handle);
 
     public static native int moonshineCreateGraphemeToPhonemizerFromFiles(String language,
             String[] filenames, TranscriberOption[] options);

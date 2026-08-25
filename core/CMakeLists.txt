@@ -6,7 +6,7 @@ enable_testing()
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(MOONSHINE_VERSION "0.1.3")
+set(MOONSHINE_VERSION "0.1.5")
 
 # Ensure the standard is strictly enforced (optional, but recommended)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -528,6 +528,32 @@ target_link_libraries(tts-repeated-memory-test PRIVATE
     moonshine
 )
 
+# Repeated create/destroy mapping leak (GitHub issue #216). File-backed
+# Transcribers must munmap every .ort they opened; this test watches
+# /proc/self/maps across reload cycles. Driven from
+# scripts/reliability-remote.sh.
+add_executable(transcriber-reload-memory-test transcriber-reload-memory-test.cpp)
+set_target_properties(transcriber-reload-memory-test PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+target_include_directories(transcriber-reload-memory-test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+)
+if (IOS OR MOONSHINE_BUILD_SWIFT)
+    set_target_properties(transcriber-reload-memory-test PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_GUI_IDENTIFIER "ai.moonshine.voice.transcriber-reload-memory-test"
+        MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+    )
+endif()
+target_link_libraries(transcriber-reload-memory-test PRIVATE
+    moonshine
+)
+
 # Make this test C++11 to ensure our API is backwards compatible, even
 # though the internal implementation is C++20.
 add_executable(moonshine-cpp-test moonshine-cpp-test.cpp)
@@ -688,6 +714,20 @@ if (NOT WIN32 OR NOT MOONSHINE_BUILD_SHARED)
         ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
     )
 
+    # Regenerates the static per-voice level table; not part of any test run.
+    add_executable(tts-voice-level-calibrate tts-voice-level-calibrate.cpp)
+    set_target_properties(tts-voice-level-calibrate PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_include_directories(tts-voice-level-calibrate PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/onnxruntime/include
+    )
+    target_link_libraries(tts-voice-level-calibrate PRIVATE moonshine)
+    copy_onnxruntime_dll(tts-voice-level-calibrate)
+
     add_executable(clone-clip-eval clone-clip-eval.cpp)
     set_target_properties(clone-clip-eval PROPERTIES
         CXX_STANDARD 20
@@ -759,6 +799,35 @@ if (NOT WIN32 OR NOT MOONSHINE_BUILD_SHARED)
         )
     else()
         target_link_libraries(cosine-distance-test PRIVATE
+            moonshine
+        )
+    endif()
+
+    add_executable(moonshine-model-catalog-test moonshine-model-catalog-test.cpp)
+    set_target_properties(moonshine-model-catalog-test PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_include_directories(moonshine-model-catalog-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+    )
+
+    if (IOS OR MOONSHINE_BUILD_SWIFT)
+        set_target_properties(moonshine-model-catalog-test PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_GUI_IDENTIFIER "ai.moonshine.voice.moonshine-model-catalog-test"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        )
+        target_link_libraries(moonshine-model-catalog-test PRIVATE
+            moonshine
+            "-framework CoreFoundation"
+            "-framework Foundation"
+        )
+    else()
+        target_link_libraries(moonshine-model-catalog-test PRIVATE
             moonshine
         )
     endif()
@@ -857,7 +926,40 @@ if (NOT WIN32 OR NOT MOONSHINE_BUILD_SHARED)
             "-framework Foundation"
         )
     else()
+        find_package(Threads REQUIRED)
         target_link_libraries(transcriber-test PRIVATE
+            moonshine
+            Threads::Threads
+        )
+    endif()
+
+    # One short decode per published tiny streaming language. Needs the
+    # test-assets/tiny-streaming-* trees from scripts/fetch-voice-assets.sh.
+    add_executable(streaming-language-smoke-test streaming-language-smoke-test.cpp)
+    set_target_properties(streaming-language-smoke-test PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_include_directories(streaming-language-smoke-test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/moonshine-utils
+        ${CMAKE_CURRENT_LIST_DIR}/third-party/doctest
+    )
+    if (IOS OR MOONSHINE_BUILD_SWIFT)
+        set_target_properties(streaming-language-smoke-test PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_GUI_IDENTIFIER "ai.moonshine.voice.streaming-language-smoke-test"
+            MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        )
+        target_link_libraries(streaming-language-smoke-test PRIVATE
+            moonshine
+            "-framework CoreFoundation"
+            "-framework Foundation"
+        )
+    else()
+        target_link_libraries(streaming-language-smoke-test PRIVATE
             moonshine
         )
     endif()

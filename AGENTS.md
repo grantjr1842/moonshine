@@ -29,7 +29,7 @@ C++ policy lives in [core/STYLE_GUIDE.md](core/STYLE_GUIDE.md): C++20, RAII, no 
 
 ## Public API
 
-Language bindings follow construct → chainable setters → `load()`. Constructors are cheap and cannot fail. Do not put downloads or model opens in a constructor. The high-level types are `MicTranscriber`, `AgentFlow`, and `TextToSpeech`; `Transcriber` is the low-level PCM path. `DialogFlow` and the Intent API are gone.
+Language bindings follow construct → chainable setters → `load()`. Constructors are cheap and cannot fail. Do not put downloads or model opens in a constructor. The high-level types are `MicTranscriber`, `AgentFlow`, and `TextToSpeech`; `Transcriber` is the low-level PCM path and `EmbeddingModel` is the low-level text-embedding path. `DialogFlow` and the Intent API are gone.
 
 Only OnnxRuntime flatbuffer models (`.ort`) are accepted. Do not add `.onnx` loading paths.
 
@@ -40,5 +40,5 @@ User-facing changes go in [CHANGELOGS.md](CHANGELOGS.md): Keep a Changelog, high
 - `core/` — C++ engine and C API (`moonshine-c-api.h`)
 - `language-bindings/` — Python, WASM, Swift, Android
 - `docs/` — mkdocs source, published at https://moonshine-voice.readthedocs.io
-- `examples/` — per-platform sample apps (the LoRA notebook is `examples/python/lora-training/`; the trainer is `moonshine_voice.lora`)
+- `examples/` — per-platform sample apps (the fine-tune notebook is `examples/python/finetune/`; the trainer is `moonshine_voice.lora` / `moonshine-voice finetune`)
 - `micro/` — tiny on-device models, separate from the main library

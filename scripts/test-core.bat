@@ -36,10 +36,16 @@ if defined BASH_EXE (
         echo error: missing test-assets and no bash to fetch them >&2
         exit /b 1
     )
-    if not exist "!REPO_ROOT_DIR!\core\moonshine-tts\data\kokoro\model.ort" (
+    if not exist "!REPO_ROOT_DIR!\core\moonshine-tts\data\kokoro\prosody.model.ort" (
         echo error: missing kokoro TTS assets and no bash to fetch them >&2
         exit /b 1
     )
+)
+
+if defined BASH_EXE (
+    echo Checking .ort weight storage...
+    "!BASH_EXE!" "!SCRIPTS_DIR!\prepare-ort-weight-storage.sh"
+    if errorlevel 1 exit /b 1
 )
 
 if exist "!BUILD_DIR!" (
@@ -76,6 +82,8 @@ if errorlevel 1 exit /b 1
 "!REPO_ROOT_DIR!\core\build\!BUILD_TYPE!\voice-activity-detector-test.exe"
 if errorlevel 1 exit /b 1
 "!REPO_ROOT_DIR!\core\build\!BUILD_TYPE!\transcriber-test.exe"
+if errorlevel 1 exit /b 1
+"!REPO_ROOT_DIR!\core\build\!BUILD_TYPE!\streaming-language-smoke-test.exe"
 if errorlevel 1 exit /b 1
 "!REPO_ROOT_DIR!\core\build\!BUILD_TYPE!\moonshine-c-api-test.exe"
 if errorlevel 1 exit /b 1

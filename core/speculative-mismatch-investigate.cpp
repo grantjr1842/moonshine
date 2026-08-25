@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -178,8 +179,10 @@ std::vector<int> decode_full_vec(MoonshineStreamingModel &model,
   if (model.decode_full(state, draft, draft_len, &out, &out_len) != 0) {
     throw std::runtime_error("decode_full failed");
   }
+  // decode_full allocates with malloc; adopt it so the buffer is released
+  // without a bare free() (see STYLE_GUIDE.md).
+  std::unique_ptr<int, decltype(&std::free)> owned(out, &std::free);
   std::vector<int> tokens(out, out + out_len);
-  std::free(out);
   return tokens;
 }
 
@@ -260,7 +263,7 @@ void compare_multitoken_vs_step(MoonshineStreamingModel &model,
 
 }  // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) try {
   std::string model_dir =
       "/Users/petewarden/projects/moonshine/test-assets/tiny-streaming-en";
   std::string wav_path =
@@ -296,7 +299,8 @@ int main(int argc, char **argv) {
   std::vector<float> audio = to_16k(wav);
   audio.resize((audio.size() / kChunkSamples) * kChunkSamples);
 
-  MoonshineStreamingState *state = model.create_state();
+  std::unique_ptr<MoonshineStreamingState> owned_state(model.create_state());
+  MoonshineStreamingState *const state = owned_state.get();
   const auto &cfg = model.config;
   std::vector<int> prev_content;
 
@@ -406,12 +410,13 @@ int main(int argc, char **argv) {
     if (is_final) break;
   }
 
-  delete state;
-
   printf("\n=== SUMMARY (%s) ===\n", wav_path.c_str());
   printf("updates=%d\n", updates);
   printf("greedy vs decode_full(nospec) mismatches: %d\n", counts_nospec);
   printf("greedy vs decode_full(prev draft) mismatches: %d\n", counts_spec);
   printf("greedy vs decode_full(self draft) mismatches: %d\n", counts_self);
   return (counts_nospec + counts_spec + counts_self) == 0 ? 0 : 2;
+} catch (const std::exception &e) {
+  fprintf(stderr, "%s\n", e.what());
+  return 1;
 }

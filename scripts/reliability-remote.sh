@@ -29,6 +29,11 @@
 #   MOONSHINE_STREAM_MEMORY_AUDIO_SECONDS  audio seconds fed by that test
 #                      (default 120); forwarded to the test binary
 #   MOONSHINE_STREAM_MEMORY_TEST_DISABLE  1 => skip the streaming memory test
+#   TRANSCRIBER_RELOAD_MEMORY_TEST_TIMEOUT  wall-clock limit for transcriber-
+#                      reload-memory-test (default 180)
+#   MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_CYCLES  create/destroy loops per case
+#                      (default 6); forwarded to the test binary
+#   MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_TEST_DISABLE  1 => skip that test
 #   TTS_MEMORY_TEST_TIMEOUT  wall-clock limit for tts-repeated-memory-test
 #                      (default 1800); the TTS engines (esp. ZipVoice) are slow
 #   MOONSHINE_TTS_MEMORY_SYNTH_ITERATIONS / _RELOAD_ITERATIONS  per-engine loop
@@ -70,6 +75,7 @@ TSAN="${TSAN:-1}"
 TSAN_STRICT="${TSAN_STRICT:-0}"
 TSAN_TEST_TIMEOUT="${TSAN_TEST_TIMEOUT:-600}"
 STREAM_MEMORY_TEST_TIMEOUT="${STREAM_MEMORY_TEST_TIMEOUT:-900}"
+TRANSCRIBER_RELOAD_MEMORY_TEST_TIMEOUT="${TRANSCRIBER_RELOAD_MEMORY_TEST_TIMEOUT:-180}"
 TTS_MEMORY_TEST_TIMEOUT="${TTS_MEMORY_TEST_TIMEOUT:-1800}"
 CC="${CC:-clang}"
 CXX="${CXX:-clang++}"
@@ -94,7 +100,7 @@ echo "=============================================================="
 # Model/TTS binaries are gitignored; bootstrap from CDN/HF on the box so tests
 # and the TTS memory regression see the same bytes clients download.
 if [[ ! -f "${REPO_ROOT_DIR}/test-assets/tiny-en/encoder_model.ort" ]] || \
-   [[ ! -f "${REPO_ROOT_DIR}/core/moonshine-tts/data/kokoro/model.ort" ]]; then
+   [[ ! -f "${REPO_ROOT_DIR}/core/moonshine-tts/data/kokoro/prosody.model.ort" ]]; then
   echo "=== Fetching voice assets (scripts/fetch-voice-assets.sh) ==="
   "${SCRIPTS_DIR}/fetch-voice-assets.sh" all
 fi
@@ -219,12 +225,14 @@ run_test string-utils    "${BUILD_DIR}/moonshine-utils/string-utils-test"
 run_test debug-utils     "${BUILD_DIR}/moonshine-utils/debug-utils-test"
 run_test resampler       "${BUILD_DIR}/resampler-test"
 run_test cosine-distance "${BUILD_DIR}/cosine-distance-test"
+run_test moonshine-model-catalog "${BUILD_DIR}/moonshine-model-catalog-test"
 run_test word-alignment  "${BUILD_DIR}/word-alignment-test"
 run_test context-biaser  "${BUILD_DIR}/context-biaser-test"
 run_test context-extractor "${BUILD_DIR}/context-extractor-test"
 run_test spelling-fusion "${BUILD_DIR}/spelling-fusion-test"
 run_test voice-activity  "${BUILD_DIR}/voice-activity-detector-test"
 run_test transcriber     "${BUILD_DIR}/transcriber-test"
+run_test streaming-language-smoke "${BUILD_DIR}/streaming-language-smoke-test"
 if [[ "${MOONSHINE_STREAM_MEMORY_TEST_DISABLE:-0}" != "1" ]]; then
   echo "  run  transcriber-streaming-memory (timeout ${STREAM_MEMORY_TEST_TIMEOUT}s)"
   stream_memory_rc=0
@@ -249,6 +257,36 @@ if [[ "${MOONSHINE_STREAM_MEMORY_TEST_DISABLE:-0}" != "1" ]]; then
   fi
 else
   echo "  skip transcriber-streaming-memory (MOONSHINE_STREAM_MEMORY_TEST_DISABLE=1)"
+fi
+
+# Repeated create/destroy .ort mapping leak (GitHub issue #216). Needs the
+# tiny-en / tiny-streaming-en trees under test-assets (fetched above).
+if [[ "${MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_TEST_DISABLE:-0}" == "1" ]]; then
+  echo "  skip transcriber-reload-memory (MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_TEST_DISABLE=1)"
+elif [[ ! -x "${BUILD_DIR}/transcriber-reload-memory-test" ]]; then
+  echo "  skip transcriber-reload-memory (missing binary)"
+else
+  echo "  run  transcriber-reload-memory (timeout ${TRANSCRIBER_RELOAD_MEMORY_TEST_TIMEOUT}s)"
+  reload_memory_rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    ( cd "${TEST_WORKDIR}" && \
+      MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_CYCLES="${MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_CYCLES:-6}" \
+      timeout -k 30 "${TRANSCRIBER_RELOAD_MEMORY_TEST_TIMEOUT}" \
+        "${BUILD_DIR}/transcriber-reload-memory-test" ) \
+      >"${ARTIFACTS_DIR}/test-transcriber-reload-memory.log" 2>&1 \
+      || reload_memory_rc=$?
+  else
+    ( cd "${TEST_WORKDIR}" && \
+      MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_CYCLES="${MOONSHINE_TRANSCRIBER_RELOAD_MEMORY_CYCLES:-6}" \
+      "${BUILD_DIR}/transcriber-reload-memory-test" ) \
+      >"${ARTIFACTS_DIR}/test-transcriber-reload-memory.log" 2>&1 \
+      || reload_memory_rc=$?
+  fi
+  if [[ "${reload_memory_rc}" == "124" || "${reload_memory_rc}" == "137" ]]; then
+    record_failure "test:transcriber-reload-memory timed out after ${TRANSCRIBER_RELOAD_MEMORY_TEST_TIMEOUT}s (see artifacts/test-transcriber-reload-memory.log)"
+  elif [[ "${reload_memory_rc}" != "0" ]]; then
+    record_failure "test:transcriber-reload-memory (see artifacts/test-transcriber-reload-memory.log)"
+  fi
 fi
 
 # Repeated-use TTS memory-growth regression (Kokoro / Piper / ZipVoice). Needs

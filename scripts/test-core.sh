@@ -8,10 +8,11 @@ MOONSHINE_TTS_BUILD_DIR="${BUILD_DIR}/moonshine-tts"
 # Model/TTS binaries are no longer in Git LFS. Always run the fetch script: it
 # is idempotent (skips files whose size already matches the CDN inventory) and
 # repairs partial trees left by an interrupted earlier download. Gating on a
-# single sentinel (kokoro/model.ort) let incomplete trees skip the repair and
+# single sentinel (kokoro/prosody.model.ort) let incomplete trees skip the repair and
 # fail later (e.g. Chinese Kokoro voices without zh_hans ONNX on the Pi).
 echo "Fetching voice assets from CDN/HF (scripts/fetch-voice-assets.sh)..."
 "${SCRIPTS_DIR}/fetch-voice-assets.sh" all
+"${SCRIPTS_DIR}/prepare-ort-weight-storage.sh"
 
 rm -rf ${BUILD_DIR}
 mkdir -p ${BUILD_DIR}
@@ -52,10 +53,12 @@ ${REPO_ROOT_DIR}/core/build/resampler-test
 ${REPO_ROOT_DIR}/core/build/voice-activity-detector-test
 ${REPO_ROOT_DIR}/core/build/speech-clip-test
 ${REPO_ROOT_DIR}/core/build/transcriber-test
+${REPO_ROOT_DIR}/core/build/streaming-language-smoke-test
 ${REPO_ROOT_DIR}/core/build/transcriber-memory-files-test
 ${REPO_ROOT_DIR}/core/build/moonshine-c-api-test
 ${REPO_ROOT_DIR}/core/build/moonshine-cpp-test
 ${REPO_ROOT_DIR}/core/build/cosine-distance-test
+${REPO_ROOT_DIR}/core/build/moonshine-model-catalog-test
 ${REPO_ROOT_DIR}/core/build/word-alignment-test
 ${REPO_ROOT_DIR}/core/build/context-biaser-test
 ${REPO_ROOT_DIR}/core/build/context-extractor-test
@@ -99,6 +102,11 @@ fi
 "${MOONSHINE_TTS_BUILD_DIR}/ukrainian_rule_g2p_test"
 "${MOONSHINE_TTS_BUILD_DIR}/hindi_rule_g2p_test"
 "${MOONSHINE_TTS_BUILD_DIR}/text_normalize_test"
+"${MOONSHINE_TTS_BUILD_DIR}/sentence_splitter_test"
+"${MOONSHINE_TTS_BUILD_DIR}/tts_stream_test"
+"${MOONSHINE_TTS_BUILD_DIR}/piper_stream_test"
+"${MOONSHINE_TTS_BUILD_DIR}/kokoro_voice_levels_test"
+"${MOONSHINE_TTS_BUILD_DIR}/piper_voice_levels_test"
 "${MOONSHINE_TTS_BUILD_DIR}/heteronym_context_test"
 "${MOONSHINE_TTS_BUILD_DIR}/ipa_postprocess_test"
 "${MOONSHINE_TTS_BUILD_DIR}/cmudict_tsv_test"

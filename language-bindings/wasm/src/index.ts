@@ -7,9 +7,9 @@
  * speech synthesis and voice cloning. Each is constructed with `new`,
  * configured with chainable setters, and prepared with a single `await load()`.
  *
- * {@link Transcriber}, {@link Stream}, {@link GraphemeToPhonemizer}, and
- * {@link AssetDownloader} are the lower-level pieces those are built from, for
- * applications that need them directly.
+ * {@link Transcriber}, {@link Stream}, {@link GraphemeToPhonemizer},
+ * {@link EmbeddingModel}, and {@link AssetDownloader} are the lower-level
+ * pieces those are built from, for applications that need them directly.
  */
 
 export {
@@ -25,12 +25,14 @@ export {
   MoonshineUnknownError,
   MoonshineInvalidHandleError,
   MoonshineInvalidArgumentError,
+  MoonshineBusyError,
   MoonshineDownloadError,
   MoonshineErrorCode,
 } from './errors.js';
 
 export {
   ModelArch,
+  EmbeddingModelArch,
   TranscribeFlags,
   modelArchToString,
   stringToModelArch,
@@ -70,6 +72,12 @@ export {
   type TranscriberFromUrlsOptions,
 } from './transcriber.js';
 export { Stream, DEFAULT_UPDATE_INTERVAL } from './stream.js';
+export {
+  EmbeddingModel,
+  type EmbeddingFromCatalog,
+  type EmbeddingFromUrlsOptions,
+  type EmbeddingModelOptions,
+} from './embedding-model.js';
 export { MicTranscriber, type ProgressCallback } from './mic-transcriber.js';
 export {
   SttWorkerHost,
@@ -83,6 +91,8 @@ export {
   TextToSpeech,
   splitSayUtterances,
   type CloneSource,
+  type TtsChunk,
+  type TtsTextSource,
   type TtsVoiceEntry,
   type TtsVoicesOptions,
 } from './text-to-speech.js';

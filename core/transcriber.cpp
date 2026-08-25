@@ -4,8 +4,10 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 
 #include "debug-utils.h"
@@ -328,20 +330,8 @@ void Transcriber::load_from_files(const char *model_path, uint32_t model_arch) {
       std::string decoder_attn_path =
           append_path_component(model_path, "decoder_kv_with_attention.ort");
       if (std::filesystem::exists(decoder_attn_path)) {
-        // Replace the streaming decoder with the attention-enabled version
-        if (this->streaming_model->decoder_kv_session) {
-          this->streaming_model->ort_api->ReleaseSession(
-              this->streaming_model->decoder_kv_session);
-        }
-        this->streaming_model->decoder_kv_session = nullptr;
-        const char *dec_mmapped = nullptr;
-        size_t dec_mmapped_size = 0;
-        int32_t dec_err = ort_session_from_path(
-            this->streaming_model->ort_api, this->streaming_model->ort_env,
-            this->streaming_model->ort_session_options,
-            decoder_attn_path.c_str(),
-            &this->streaming_model->decoder_kv_session, &dec_mmapped,
-            &dec_mmapped_size);
+        int32_t dec_err = this->streaming_model->replace_decoder_kv_from_path(
+            decoder_attn_path.c_str());
         if (dec_err != 0) {
           LOGF("Warning: Failed to load decoder_kv_with_attention from %s\n",
                decoder_attn_path.c_str());
@@ -394,17 +384,8 @@ void Transcriber::load_from_files(const char *model_path, uint32_t model_arch) {
 
       if (std::filesystem::exists(decoder_attn_path)) {
         // Single-pass: replace decoder with attention-enabled version
-        if (this->stt_model->decoder_session) {
-          this->stt_model->ort_api->ReleaseSession(
-              this->stt_model->decoder_session);
-        }
-        this->stt_model->decoder_session = nullptr;
-        const char *dec_mmapped = nullptr;
-        size_t dec_mmapped_size = 0;
-        int32_t dec_err = ort_session_from_path(
-            this->stt_model->ort_api, this->stt_model->ort_env,
-            this->stt_model->ort_session_options, decoder_attn_path.c_str(),
-            &this->stt_model->decoder_session, &dec_mmapped, &dec_mmapped_size);
+        int32_t dec_err = this->stt_model->replace_decoder_from_path(
+            decoder_attn_path.c_str());
         if (dec_err != 0) {
           LOGF("Warning: Failed to load decoder_with_attention from %s\n",
                decoder_attn_path.c_str());
@@ -461,6 +442,8 @@ const std::vector<std::string> &recognized_transcriber_model_files() {
       "decoder_model_merged.ort",
       // Required by the streaming architectures.
       "frontend.ort",
+      "frontend.model.ort",
+      "frontend.weights.ort",
       "encoder.ort",
       "adapter.ort",
       "cross_kv.ort",
@@ -531,6 +514,8 @@ void Transcriber::load_from_memory_files(uint32_t model_arch) {
   if (is_streaming_model_arch(model_arch)) {
     const uint8_t *frontend_data = nullptr;
     size_t frontend_size = 0;
+    const uint8_t *frontend_weights_data = nullptr;
+    size_t frontend_weights_size = 0;
     const uint8_t *encoder_data = nullptr;
     size_t encoder_size = 0;
     const uint8_t *adapter_data = nullptr;
@@ -541,7 +526,14 @@ void Transcriber::load_from_memory_files(uint32_t model_arch) {
     size_t decoder_kv_size = 0;
     const uint8_t *config_data = nullptr;
     size_t config_size = 0;
-    require_bytes("frontend.ort", &frontend_data, &frontend_size);
+    if (this->options.model_files.contains("frontend.model.ort") &&
+        this->options.model_files.contains("frontend.weights.ort")) {
+      require_bytes("frontend.model.ort", &frontend_data, &frontend_size);
+      require_bytes("frontend.weights.ort", &frontend_weights_data,
+                    &frontend_weights_size);
+    } else {
+      require_bytes("frontend.ort", &frontend_data, &frontend_size);
+    }
     require_bytes("encoder.ort", &encoder_data, &encoder_size);
     require_bytes("adapter.ort", &adapter_data, &adapter_size);
     require_bytes("cross_kv.ort", &cross_kv_data, &cross_kv_size);
@@ -565,7 +557,8 @@ void Transcriber::load_from_memory_files(uint32_t model_arch) {
         frontend_data, frontend_size, encoder_data, encoder_size, adapter_data,
         adapter_size, cross_kv_data, cross_kv_size, decoder_kv_data,
         decoder_kv_size, tokenizer_data, tokenizer_data_size,
-        this->streaming_model->config, model_arch);
+        this->streaming_model->config, model_arch, frontend_weights_data,
+        frontend_weights_size);
     if (load_error != 0) {
       throw std::runtime_error(
           "Failed to load Moonshine streaming models from memory. Error "
@@ -780,9 +773,27 @@ void Transcriber::stop_stream(int32_t stream_id) {
   if (stream == nullptr) {
     return;
   }
-  stream->stop();
+  {
+    // Refuse further add_audio_to_stream calls, but keep leftover samples and
+    // the current VAD utterance open so the next transcribe_stream can drain
+    // them into a final transcript.
+    std::lock_guard<std::mutex> vad_lock(stream->vad_mutex);
+    stream->stop();
+  }
   stream->save_audio_data_to_wav(nullptr, 0, 0);
   if (diarizer != nullptr && diarizer_stream_id >= 0) {
+    // Hand leftover audio to the diarizer before the final clustering pass.
+    // Copy under the audio-buffer lock because transcribe_stream may consume
+    // the buffer concurrently after stop releases streams_mutex.
+    std::vector<float> leftover_audio;
+    {
+      std::lock_guard<std::mutex> audio_lock(stream->audio_buffer_mutex);
+      leftover_audio = stream->new_audio_buffer;
+    }
+    if (!leftover_audio.empty()) {
+      diarizer->add_audio_to_stream(diarizer_stream_id, leftover_audio.data(),
+                                    leftover_audio.size(), INTERNAL_SAMPLE_RATE);
+    }
     // Run a final clustering pass so the next transcribe_stream call picks up
     // the finalized speaker spans.
     diarizer->finish_stream(diarizer_stream_id);
@@ -829,11 +840,19 @@ void Transcriber::add_audio_to_stream(int32_t stream_id,
 void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
                                     struct transcript_t **out_transcript) {
   TranscriberStream *stream = nullptr;
+  std::vector<float> audio_snapshot;
+  bool should_update = false;
+  bool is_stopped = false;
+  bool diarization_enabled = false;
   {
     // Resolve the stream pointer entirely under streams_mutex. Reading the map
     // outside the lock (as an earlier version did on a second streams[] lookup)
     // races with create_stream()/free_stream() mutating the map on another
     // thread, which ThreadSanitizer flags and can corrupt the red-black tree.
+    // Swap the pending audio out in the same critical section so add_audio on
+    // another thread cannot reallocate the vector while we transcribe, and so
+    // overlapping transcribe_stream calls cannot both consume the same buffer
+    // (GitHub issue #218).
     std::lock_guard<std::mutex> lock(this->streams_mutex);
     auto it = this->streams.find(stream_id);
     if (it == this->streams.end()) {
@@ -849,38 +868,35 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
       throw std::runtime_error(error_message);
     }
     stream = it->second;
+    if (stream == nullptr) {
+      std::string error_message =
+          "Stream with ID " + std::to_string(stream_id) + " is null";
+      throw std::runtime_error(error_message);
+    }
+
+    is_stopped = !stream->vad->is_active();
+    diarization_enabled =
+        (this->speaker_diarizer != nullptr && stream->diarizer_stream_id >= 0);
+    const uint64_t audio_length = stream->new_audio_buffer.size();
+    const bool has_new_audio = (audio_length > 0);
+    const float new_audio_duration =
+        audio_length / (float)(INTERNAL_SAMPLE_RATE);
+    const bool long_enough_to_analyze =
+        new_audio_duration >= this->options.transcription_interval;
+    const bool force_update = flags & MOONSHINE_FLAG_FORCE_UPDATE;
+    // After stop_stream the leftover buffer is still valid. Drain it even if
+    // it is shorter than transcription_interval so stop-then-transcribe_stream
+    // produces a final transcript without earlier partial updates.
+    should_update =
+        (long_enough_to_analyze || force_update || is_stopped) && has_new_audio;
+    if (should_update) {
+      std::lock_guard<std::mutex> audio_lock(stream->audio_buffer_mutex);
+      audio_snapshot.swap(stream->new_audio_buffer);
+    }
   }
 
-  if (stream == nullptr) {
-    std::string error_message =
-        "Stream with ID " + std::to_string(stream_id) + " is null";
-    throw std::runtime_error(error_message);
-  }
-
-  // A-065: atomically swap the pending audio buffer into a local snapshot
-  // under audio_buffer_mutex. New audio arriving via add_to_new_audio_buffer
-  // after the swap continues queuing into a fresh empty buffer; the local
-  // snapshot stays stable for the duration of the VAD processing that
-  // follows. Eliminates the iterator/pointer invalidation race that
-  // existed when add_to_new_audio_buffer mutated the same vector out
-  // from under transcribe_stream's read.
-  std::vector<float> audio_snapshot;
-  {
-    std::lock_guard<std::mutex> lock(stream->audio_buffer_mutex);
-    audio_snapshot.swap(stream->new_audio_buffer);
-  }
   const float *audio_data = audio_snapshot.data();
   const uint64_t audio_length = audio_snapshot.size();
-  const bool has_new_audio = (audio_length > 0);
-  const float new_audio_duration = audio_length / (float)(INTERNAL_SAMPLE_RATE);
-  const bool long_enough_to_analyze =
-      new_audio_duration >= this->options.transcription_interval;
-  const bool force_update = flags & MOONSHINE_FLAG_FORCE_UPDATE;
-  const bool should_update =
-      (long_enough_to_analyze || force_update) && has_new_audio;
-  const bool is_stopped = !stream->vad->is_active();
-  const bool diarization_enabled =
-      (this->speaker_diarizer != nullptr && stream->diarizer_stream_id >= 0);
   // Return the cached transcript if it's only been a short time since the
   // last transcription.
   //
@@ -904,6 +920,10 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
     }
     // Ensure that all lines are marked as complete if the stream is stopped.
     if (is_stopped) {
+      {
+        std::lock_guard<std::mutex> lock(stream->vad_mutex);
+        stream->vad->stop();
+      }
       stream->transcript_output->mark_all_lines_as_complete();
     }
     if (speakers_changed) {
@@ -918,8 +938,9 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
   // Feed the new audio to the diarizer before it's consumed. This runs at
   // most one segmentation/embedding window per call (further windows wait
   // for the next call or Stop) and re-clusters on the configured cadence,
-  // which is the main cost of identify_speakers.
-  if (diarization_enabled) {
+  // which is the main cost of identify_speakers. After stop_stream the
+  // leftover samples were already appended and clustered, so skip the add.
+  if (diarization_enabled && !is_stopped) {
     this->speaker_diarizer->add_audio_to_stream(stream->diarizer_stream_id,
                                                 audio_data, audio_length,
                                                 INTERNAL_SAMPLE_RATE);
@@ -929,8 +950,13 @@ void Transcriber::transcribe_stream(int32_t stream_id, uint32_t flags,
   std::vector<VoiceActivitySegment> segments;
   {
     std::lock_guard<std::mutex> lock(stream->vad_mutex);
-    stream->vad->process_audio(audio_data, (int32_t)audio_length,
-                               INTERNAL_SAMPLE_RATE);
+    if (is_stopped) {
+      stream->vad->flush(audio_data, (size_t)audio_length,
+                         INTERNAL_SAMPLE_RATE);
+    } else {
+      stream->vad->process_audio(audio_data, (size_t)audio_length,
+                                 INTERNAL_SAMPLE_RATE);
+    }
     const std::vector<VoiceActivitySegment> *vad_segments =
         stream->vad->get_segments();
     segments.reserve(vad_segments->size());
@@ -1175,13 +1201,14 @@ void Transcriber::update_transcript_from_segments(
         // Alignment is a second pass over the segment and costs about a quarter
         // of a streaming update, while an unfinished segment is re-transcribed
         // from scratch every time round, so aligning one before it ends is work
-        // that gets thrown away and redone a fraction of a second later. Waiting
-        // for the end loses nothing: the detector always closes a segment with
-        // both is_complete and just_updated set, including when the stream stops
-        // mid-speech, so every line still gets aligned exactly once, against its
-        // final text. Only the non-streaming models pay this, which is why the
-        // streaming branch above aligns unconditionally -- there the timings fall
-        // out of attention the transcription pass already computed.
+        // that gets thrown away and redone a fraction of a second later.
+        // Waiting for the end loses nothing: the detector always closes a
+        // segment with both is_complete and just_updated set, including when
+        // the stream stops mid-speech, so every line still gets aligned exactly
+        // once, against its final text. Only the non-streaming models pay this,
+        // which is why the streaming branch above aligns unconditionally --
+        // there the timings fall out of attention the transcription pass
+        // already computed.
         if (this->options.word_timestamps && segment.is_complete) {
           float seg_duration =
               segment.audio_data.size() / (float)INTERNAL_SAMPLE_RATE;
@@ -1399,7 +1426,13 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
 
   const MoonshineStreamingConfig &config = this->streaming_model->config;
 
-  // Check if this is a new segment - if so, reset state
+  // Biaser first, then the streaming model: set_keyterms only takes the
+  // biaser lock, and decode below needs both. Hold the model lock across
+  // reset/encode/decode so a concurrent transcribe_stream cannot wipe
+  // memory while cross-KV is running (GitHub issue #218).
+  std::lock_guard<std::mutex> biaser_lock(this->context_biaser_mutex);
+  std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
+
   bool is_new_segment = (segment_id != this->current_streaming_segment_id);
   if (is_new_segment) {
     this->streaming_state.reset(config);
@@ -1408,51 +1441,49 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
     this->last_streaming_tokens.clear();
   }
 
-  // Calculate how many new samples we need to process
   size_t new_samples_start = this->streaming_samples_processed;
 
-  if (new_samples_start >= audio_length) {
-    // No new audio to process, but we may still need to decode
-    // (e.g., if is_final changed from false to true)
-  } else {
-    // Process only the NEW audio samples
+  if (new_samples_start < audio_length) {
     const float *new_audio_data = audio_data + new_samples_start;
     size_t new_audio_length = audio_length - new_samples_start;
 
-    const int chunk_size = 1280;  // 80ms at 16kHz
+    // 80ms at 16kHz. Feeding whole chunks and carrying the remainder over to
+    // the next call is a hard requirement of the exported frontend graph, not a
+    // tidiness preference: a chunk length that is not a multiple of 80 samples
+    // leaves leftover samples that every streaming .ort published before
+    // 2026-08-23 drops on the floor while still reporting them as buffered, so
+    // the following chunk reads silence in place of audio. The graphs were
+    // exported from a traced PyTorch module and the branch that saved the
+    // remainder was traced away against an aligned example input; models
+    // exported after that date handle it, but English ships pre-fix graphs
+    // until it is re-exported. Any new binding or test that feeds arbitrary
+    // chunk sizes needs to do its own aligning here rather than assume the
+    // graph will.
+    const int chunk_size = 1280;
     const size_t chunk_count = new_audio_length / chunk_size;
-    {
-      std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
 
-      for (size_t chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
-        size_t offset = chunk_index * chunk_size;
-        int err = this->streaming_model->process_audio_chunk(
-            &this->streaming_state, new_audio_data + offset, chunk_size,
-            nullptr);
-        if (err != 0) {
-          LOGF("Failed to process audio chunk: %d", err);
-          throw std::runtime_error("Failed to process audio chunk: " +
-                                   std::to_string(err));
-        }
-      }
-
-      // Run encoder - is_final determines if we emit all frames or keep
-      // lookahead
-      int new_frames = 0;
-      int err = this->streaming_model->encode(&this->streaming_state, is_final,
-                                              &new_frames);
+    for (size_t chunk_index = 0; chunk_index < chunk_count; chunk_index++) {
+      size_t offset = chunk_index * chunk_size;
+      int err = this->streaming_model->process_audio_chunk(
+          &this->streaming_state, new_audio_data + offset, chunk_size, nullptr);
       if (err != 0) {
-        LOGF("Failed to encode: %d", err);
-        throw std::runtime_error("Failed to encode: " + std::to_string(err));
+        LOGF("Failed to process audio chunk: %d", err);
+        throw std::runtime_error("Failed to process audio chunk: " +
+                                 std::to_string(err));
       }
     }
 
-    // Update the count of processed samples with the chunks we've actually
-    // processed.
+    int new_frames = 0;
+    int err = this->streaming_model->encode(&this->streaming_state, is_final,
+                                            &new_frames);
+    if (err != 0) {
+      LOGF("Failed to encode: %d", err);
+      throw std::runtime_error("Failed to encode: " + std::to_string(err));
+    }
+
     this->streaming_samples_processed += chunk_count * chunk_size;
   }
 
-  // If no memory accumulated, return empty string
   if (this->streaming_state.memory_len == 0) {
     return new std::string();
   }
@@ -1461,11 +1492,8 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
     return new std::string();
   }
 
-  // Reset decoder state before decoding (we decode from scratch each time
-  // since memory may have changed)
   this->streaming_model->decoder_reset(&this->streaming_state);
 
-  // Decode to get transcription
   const float duration_sec = audio_length / (float)INTERNAL_SAMPLE_RATE;
   const int max_tokens =
       std::min(static_cast<int>(std::ceil(duration_sec *
@@ -1473,94 +1501,80 @@ std::string *Transcriber::transcribe_segment_with_streaming_model(
                256);
   std::vector<int64_t> tokens;
 
-  // Held across the whole decode so a concurrent set_keyterms cannot swap the
-  // trie out from under it. Always taken before streaming_model_mutex.
-  std::lock_guard<std::mutex> biaser_lock(this->context_biaser_mutex);
   ContextBiaser *biaser =
       this->context_biaser.empty() ? nullptr : &this->context_biaser;
 
-  {
-    std::lock_guard<std::mutex> lock(this->streaming_model_mutex);
+  if (this->options.use_speculative_decoding && !is_new_segment &&
+      !this->last_streaming_tokens.empty()) {
+    std::vector<int> draft;
+    draft.reserve(this->last_streaming_tokens.size());
+    for (int t : this->last_streaming_tokens) {
+      if (t == config.bos_id || t == config.eos_id) continue;
+      draft.push_back(t);
+    }
 
-    if (this->options.use_speculative_decoding && !is_new_segment &&
-        !this->last_streaming_tokens.empty()) {
-      // Previous content tokens as draft (strip BOS/EOS).
-      std::vector<int> draft;
-      draft.reserve(this->last_streaming_tokens.size());
-      for (int t : this->last_streaming_tokens) {
-        if (t == config.bos_id || t == config.eos_id) continue;
-        draft.push_back(t);
-      }
+    int *out = nullptr;
+    int out_len = 0;
+    const int *draft_ptr = draft.empty() ? nullptr : draft.data();
+    int err = this->streaming_model->decode_full(
+        &this->streaming_state, draft_ptr, static_cast<int>(draft.size()), &out,
+        &out_len, biaser);
+    if (err != 0) {
+      LOGF("Speculative decode_full failed: %d", err);
+      throw std::runtime_error("Speculative decode_full failed: " +
+                               std::to_string(err));
+    }
+    std::unique_ptr<int, decltype(&std::free)> owned(out, &std::free);
+    tokens.push_back(config.bos_id);
+    for (int i = 0; i < out_len; ++i) {
+      tokens.push_back(out[i]);
+    }
+    if (tokens.empty() || tokens.back() != config.eos_id) {
+      // decode_full omits EOS; leave as-is for text conversion.
+    }
+  } else {
+    tokens.push_back(config.bos_id);
+    std::vector<float> logits(config.vocab_size);
+    int current_token = config.bos_id;
+    if (biaser != nullptr) {
+      biaser->reset();
+    }
 
-      int *out = nullptr;
-      int out_len = 0;
-      const int *draft_ptr = draft.empty() ? nullptr : draft.data();
-      int err = this->streaming_model->decode_full(
-          &this->streaming_state, draft_ptr, static_cast<int>(draft.size()),
-          &out, &out_len, biaser);
+    for (int step = 0; step < max_tokens; ++step) {
+      int err = this->streaming_model->decode_step(
+          &this->streaming_state, current_token, logits.data());
       if (err != 0) {
-        LOGF("Speculative decode_full failed: %d", err);
-        throw std::runtime_error("Speculative decode_full failed: " +
-                                 std::to_string(err));
+        break;
       }
-      tokens.push_back(config.bos_id);
-      for (int i = 0; i < out_len; ++i) {
-        tokens.push_back(out[i]);
-      }
-      // Match greedy path: append EOS when decode_full stopped without it.
-      if (tokens.empty() || tokens.back() != config.eos_id) {
-        // decode_full omits EOS; leave as-is for text conversion.
-      }
-      std::free(out);
-    } else {
-      tokens.push_back(config.bos_id);
-      std::vector<float> logits(config.vocab_size);
-      int current_token = config.bos_id;
-      // This pass decodes from BOS, so any partial key-term match left over
-      // from the previous pass is meaningless.
+
       if (biaser != nullptr) {
-        biaser->reset();
+        biaser->apply(logits.data(), config.vocab_size);
       }
 
-      for (int step = 0; step < max_tokens; ++step) {
-        int err = this->streaming_model->decode_step(
-            &this->streaming_state, current_token, logits.data());
-        if (err != 0) {
-          break;
+      int next_token = 0;
+      float max_logit = logits[0];
+      for (int i = 1; i < config.vocab_size; ++i) {
+        if (logits[i] > max_logit) {
+          max_logit = logits[i];
+          next_token = i;
         }
+      }
 
-        if (biaser != nullptr) {
-          biaser->apply(logits.data(), config.vocab_size);
-        }
+      tokens.push_back(next_token);
+      current_token = next_token;
 
-        // Argmax
-        int next_token = 0;
-        float max_logit = logits[0];
-        for (int i = 1; i < config.vocab_size; ++i) {
-          if (logits[i] > max_logit) {
-            max_logit = logits[i];
-            next_token = i;
-          }
-        }
-
-        tokens.push_back(next_token);
-        current_token = next_token;
-
-        if (next_token == config.eos_id) break;
-        if (biaser != nullptr) {
-          biaser->advance(next_token);
-        }
+      if (next_token == config.eos_id) break;
+      if (biaser != nullptr) {
+        biaser->advance(next_token);
       }
     }
   }
 
-  // Save tokens for word timestamp alignment / next speculative draft
   this->last_streaming_tokens.clear();
   for (auto t : tokens) {
     this->last_streaming_tokens.push_back(static_cast<int>(t));
   }
 
-  // Convert tokens to text
   std::string text = this->streaming_model->tokens_to_text(tokens);
   if (this->options.log_output_text) {
     LOGF("Streaming model transcribed text: '%s'", text.c_str());
@@ -1889,7 +1903,7 @@ void TranscriberStream::start() {
   this->transcript_output->ordered_internal_line_ids.clear();
 }
 
-void TranscriberStream::stop() { this->vad->stop(); }
+void TranscriberStream::stop() { this->vad->deactivate(); }
 
 std::string TranscriberStream::get_wav_filename() {
   if (this->stream_id == -1) {

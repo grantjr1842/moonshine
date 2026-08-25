@@ -41,7 +41,23 @@ constexpr const char* kCdnModelBase = "https://download.moonshine.ai/model";
 // against and a rollback is a one-line change. Clients key their download cache
 // off this URL, so a new directory also guarantees a clean re-fetch instead of
 // silently reusing stale files.
-constexpr const char* kStreamingQuantizedDir = "/quantized_26_07_30";
+constexpr const char* kStreamingQuantizedDir = "/quantized_26_08_21";
+
+// The same scheme for Japanese, which was quantized from different checkpoints
+// on a different day. Per-language rather than shared, because a language's
+// weights are re-quantized when that language gets a better checkpoint, and one
+// shared constant would force every language to move at once.
+constexpr const char* kJapaneseStreamingQuantizedDir = "/quantized_26_08_23";
+
+// The six additional languages published as streaming, each with its own
+// constant for the reason above. Tagalog in particular is a snapshot of a run
+// that was still training, so it is the one most likely to move on its own.
+constexpr const char* kGermanStreamingQuantizedDir = "/quantized_26_08_24";
+constexpr const char* kSpanishStreamingQuantizedDir = "/quantized_26_08_24";
+constexpr const char* kVietnameseStreamingQuantizedDir = "/quantized_26_08_24";
+constexpr const char* kArabicStreamingQuantizedDir = "/quantized_26_08_24";
+constexpr const char* kChineseStreamingQuantizedDir = "/quantized_26_08_24";
+constexpr const char* kTagalogStreamingQuantizedDir = "/quantized_26_08_24";
 
 struct SttModelEntry {
   int32_t model_arch;
@@ -86,14 +102,50 @@ bool is_streaming_arch(int32_t model_arch) {
 // listed for a language is its default.
 const std::vector<SttLanguageEntry>& stt_catalog() {
   static const std::vector<SttLanguageEntry> catalog = {
+      // Streaming first, so it is the default, mirroring English and Japanese.
+      // Tiny streaming measures 15.5 WER across Common Voice and FLEURS on a
+      // seeded 400-clip sample at batch 1, as deployed. The older base entry
+      // stays listed for callers that ask for that architecture by name; it was
+      // never scored on this panel, so this is not a claim that streaming beats
+      // it, only that streaming is what we now measure and ship.
       {"ar",
        "Arabic",
-       {{MOONSHINE_MODEL_ARCH_BASE,
-         std::string(kCdnModelBase) + "/base-ar/quantized/base-ar"}}},
+       {
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-ar" +
+                kArabicStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_BASE,
+            std::string(kCdnModelBase) + "/base-ar/quantized/base-ar"},
+       }},
+      // Small and tiny streaming measure 4.9 and 6.2 WER across FLEURS and MLS
+      // on a seeded 400-clip sample at batch 1. As for Arabic, the base entry
+      // is
+      // kept for callers that name that architecture and was never scored here.
       {"es",
        "Spanish",
-       {{MOONSHINE_MODEL_ARCH_BASE,
-         std::string(kCdnModelBase) + "/base-es/quantized/base-es"}}},
+       {
+           {MOONSHINE_MODEL_ARCH_SMALL_STREAMING,
+            std::string(kCdnModelBase) + "/small-streaming-es" +
+                kSpanishStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-es" +
+                kSpanishStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_BASE,
+            std::string(kCdnModelBase) + "/base-es/quantized/base-es"},
+       }},
+      // German is a new language for the catalog: there is no older base model
+      // to fall back to. Small and tiny streaming measure 7.5 and 12.0 WER
+      // across FLEURS and MLS on a seeded 400-clip sample at batch 1.
+      {"de",
+       "German",
+       {
+           {MOONSHINE_MODEL_ARCH_SMALL_STREAMING,
+            std::string(kCdnModelBase) + "/small-streaming-de" +
+                kGermanStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-de" +
+                kGermanStreamingQuantizedDir},
+       }},
       {"en",
        "English",
        {
@@ -111,9 +163,22 @@ const std::vector<SttLanguageEntry>& stt_catalog() {
            {MOONSHINE_MODEL_ARCH_TINY,
             std::string(kCdnModelBase) + "/tiny-en/quantized/tiny-en"},
        }},
+      // Streaming first, so it is the default, mirroring English. Small and
+      // tiny streaming measure 17.2 and 19.7 no-space CER across FLEURS and
+      // ReazonSpeech (batch 1, as deployed). The older non-streaming base and
+      // tiny entries stay listed for callers that ask for those architectures
+      // by name; they were never scored on this panel, so this is not a claim
+      // that streaming beats them, only that streaming is what we now measure
+      // and ship.
       {"ja",
        "Japanese",
        {
+           {MOONSHINE_MODEL_ARCH_SMALL_STREAMING,
+            std::string(kCdnModelBase) + "/small-streaming-ja" +
+                kJapaneseStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-ja" +
+                kJapaneseStreamingQuantizedDir},
            {MOONSHINE_MODEL_ARCH_BASE,
             std::string(kCdnModelBase) + "/base-ja/quantized/base-ja"},
            {MOONSHINE_MODEL_ARCH_TINY,
@@ -125,18 +190,50 @@ const std::vector<SttLanguageEntry>& stt_catalog() {
        "Korean",
        {{MOONSHINE_MODEL_ARCH_TINY,
          std::string(kCdnModelBase) + "/tiny-ko/quantized/tiny-ko"}}},
+      // Tiny streaming measures 9.4 WER across FLEURS and LSVSC on a seeded
+      // 400-clip sample at batch 1. The base entry is kept for callers that
+      // name
+      // that architecture and was never scored here.
       {"vi",
        "Vietnamese",
-       {{MOONSHINE_MODEL_ARCH_BASE,
-         std::string(kCdnModelBase) + "/base-vi/quantized/base-vi"}}},
+       {
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-vi" +
+                kVietnameseStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_BASE,
+            std::string(kCdnModelBase) + "/base-vi/quantized/base-vi"},
+       }},
       {"uk",
        "Ukrainian",
        {{MOONSHINE_MODEL_ARCH_BASE,
          std::string(kCdnModelBase) + "/base-uk/quantized/base-uk"}}},
+      // Mandarin is scored with no-space CER, never WER, for the same reason as
+      // Japanese: the language is written without spaces, so word-level
+      // alignment measures the tokenizer rather than the model. Tiny streaming
+      // measures 16.1 no-space CER across FLEURS and WenetSpeech on a seeded
+      // 400-clip sample at batch 1. The base entry is kept for callers that
+      // name
+      // that architecture and was never scored here.
       {"zh",
        "Chinese",
-       {{MOONSHINE_MODEL_ARCH_BASE,
-         std::string(kCdnModelBase) + "/base-zh/quantized/base-zh"}}},
+       {
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-zh" +
+                kChineseStreamingQuantizedDir},
+           {MOONSHINE_MODEL_ARCH_BASE,
+            std::string(kCdnModelBase) + "/base-zh/quantized/base-zh"},
+       }},
+      // Tagalog is a new language for the catalog, and its entry is a snapshot
+      // of a Stage A run that had not finished training when it was taken:
+      // 14.9 WER on FLEURS at batch 1, the only Tagalog panel we hold, so this
+      // number rests on one read-speech set rather than a macro over two.
+      {"tl",
+       "Tagalog",
+       {
+           {MOONSHINE_MODEL_ARCH_TINY_STREAMING,
+            std::string(kCdnModelBase) + "/tiny-streaming-tl" +
+                kTagalogStreamingQuantizedDir},
+       }},
   };
   return catalog;
 }
@@ -159,7 +256,7 @@ const std::vector<EmbeddingModelEntry>& embedding_catalog() {
       {"embeddinggemma-300m",
        "Embedding Gemma 300M",
        std::string(kCdnModelBase) + "/embeddinggemma-300m",
-       {"q4", "q8", "fp16", "fp32", "q4f16"},
+       {"q4", "q8"},
        "q4"},
   };
   return catalog;
@@ -199,9 +296,9 @@ std::vector<std::string> stt_component_files(const std::string& language_code,
   const bool is_english = (language_code == "en");
   if (is_streaming_arch(model_arch)) {
     std::vector<std::string> files = {
-        "adapter.ort",   "cross_kv.ort", "decoder_kv.ort",
-        "encoder.ort",   "frontend.ort", "streaming_config.json",
-        "tokenizer.bin",
+        "adapter.ort",           "cross_kv.ort",       "decoder_kv.ort",
+        "encoder.ort",           "frontend.model.ort", "frontend.weights.ort",
+        "streaming_config.json", "tokenizer.bin",
     };
     if (is_english && include_word_timestamps) {
       files.push_back("decoder_kv_with_attention.ort");
@@ -246,16 +343,10 @@ const EmbeddingModelEntry* find_embedding_model(const std::string& model_name) {
 // ``.ort`` files are produced from the published ``.onnx`` + ``.onnx_data``.
 std::vector<std::string> embedding_component_files(const std::string& variant) {
   std::string stem;
-  if (variant == "fp32") {
-    stem = "model";
-  } else if (variant == "fp16") {
-    stem = "model_fp16";
-  } else if (variant == "q8") {
+  if (variant == "q8") {
     stem = "model_quantized";
   } else if (variant == "q4") {
     stem = "model_q4";
-  } else if (variant == "q4f16") {
-    stem = "model_q4f16";
   } else {
     return {};
   }
@@ -358,6 +449,78 @@ std::vector<std::string> embedding_supported_variants(
     return {};
   }
   return model->variants;
+}
+
+std::string embedding_variant_unsupported_message(const std::string& variant) {
+  if (variant == "fp32" || variant == "fp16" || variant == "q4f16") {
+    return "The \"" + variant +
+           "\" embedding model variant is no longer supported. "
+           "Use \"q4\" (the default) or \"q8\".";
+  }
+  return {};
+}
+
+namespace {
+
+std::string model_arch_label(int32_t model_arch) {
+  const char* name = nullptr;
+  switch (model_arch) {
+    case MOONSHINE_MODEL_ARCH_TINY:
+      name = "TINY";
+      break;
+    case MOONSHINE_MODEL_ARCH_BASE:
+      name = "BASE";
+      break;
+    case MOONSHINE_MODEL_ARCH_TINY_STREAMING:
+      name = "TINY_STREAMING";
+      break;
+    case MOONSHINE_MODEL_ARCH_BASE_STREAMING:
+      name = "BASE_STREAMING";
+      break;
+    case MOONSHINE_MODEL_ARCH_SMALL_STREAMING:
+      name = "SMALL_STREAMING";
+      break;
+    case MOONSHINE_MODEL_ARCH_MEDIUM_STREAMING:
+      name = "MEDIUM_STREAMING";
+      break;
+    default:
+      break;
+  }
+  std::string label = std::to_string(model_arch);
+  if (name != nullptr) {
+    label += " (";
+    label += name;
+    label += ")";
+  }
+  return label;
+}
+
+}  // namespace
+
+std::string stt_missing_dependencies_message(
+    const std::string& language, std::optional<int32_t> model_arch) {
+  const SttLanguageEntry* lang = find_stt_language(language);
+  if (lang == nullptr || lang->models.empty()) {
+    return "unknown language \"" + language + "\"";
+  }
+  if (!model_arch.has_value()) {
+    return {};
+  }
+  for (const SttModelEntry& candidate : lang->models) {
+    if (candidate.model_arch == *model_arch) {
+      return {};
+    }
+  }
+  std::string supported;
+  const char* sep = "";
+  for (const SttModelEntry& model : lang->models) {
+    supported += sep;
+    supported += model_arch_label(model.model_arch);
+    sep = ", ";
+  }
+  return "language \"" + language + "\" has no model_arch " +
+         model_arch_label(*model_arch) +
+         "; supported architectures: " + supported;
 }
 
 std::vector<SttCatalogLanguage> stt_catalog_listing() {

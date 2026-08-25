@@ -50,6 +50,11 @@ add_library(moonshine_tts_core STATIC
   src/lang-specific/english-numbers.cpp
   src/lang-specific/french-oov.cpp
   src/text-normalize.cpp
+  src/sentence-splitter.cpp
+  src/tts-stream.cpp
+  src/chunk-policy.cpp
+  src/kokoro-voice-levels.cpp
+  src/piper-voice-levels.cpp
   src/lang-specific/arabic-ipa.cpp
   src/lang-specific/cmudict-tsv.cpp
   src/lang-specific/heteronym-context.cpp
@@ -60,7 +65,6 @@ add_library(moonshine_tts_core STATIC
 target_include_directories(moonshine_tts_core PUBLIC
   ${_MOONSHINE_TTS_ROOT}/src
   ${_MOONSHINE_TTS_ROOT}/src/lang-specific
-  ${_MOONSHINE_CORE_ROOT}
   ${_MOONSHINE_CORE_ROOT}/third-party
 )
 target_include_directories(moonshine_tts_core PRIVATE
@@ -116,9 +120,8 @@ function(moonshine_tts_add_test name)
   )
   target_link_libraries(${name} PRIVATE ${ARGN})
   add_test(NAME ${name} COMMAND ${name} WORKING_DIRECTORY "${MOONSHINE_MONOREPO_ROOT}")
-  # CMake may emit $ORIGIN in an executable's RUNPATH even when the linked
-  # ORT library lives elsewhere. Keep CTest self-contained by supplying the
-  # selected runtime directory explicitly for every registered TTS test.
+  # Keep CTest self-contained when the selected ONNX Runtime is a shared
+  # library outside the executable's default runtime search path.
   if(MOONSHINE_TTS_ORT_LIB MATCHES "\\.so$")
     get_filename_component(_moonshine_tts_ort_test_lib_dir
       "${MOONSHINE_TTS_ORT_LIB}" DIRECTORY)
@@ -149,6 +152,11 @@ moonshine_tts_add_test(turkish_rule_g2p_test moonshine_tts_core)
 moonshine_tts_add_test(ukrainian_rule_g2p_test moonshine_tts_core)
 moonshine_tts_add_test(hindi_rule_g2p_test moonshine_tts_core)
 moonshine_tts_add_test(text_normalize_test moonshine_tts_core)
+moonshine_tts_add_test(sentence_splitter_test moonshine_tts_core)
+moonshine_tts_add_test(tts_stream_test moonshine_tts_core)
+moonshine_tts_add_test(chunk_policy_test moonshine_tts_core)
+moonshine_tts_add_test(kokoro_voice_levels_test moonshine_tts_core)
+moonshine_tts_add_test(piper_voice_levels_test moonshine_tts_core)
 moonshine_tts_add_test(heteronym_context_test moonshine_tts_core)
 moonshine_tts_add_test(ipa_postprocess_test moonshine_tts_core)
 moonshine_tts_add_test(cmudict_tsv_test moonshine_tts_core)
@@ -190,6 +198,7 @@ if(MOONSHINE_TTS_BUILD_ONNX)
 
   target_link_libraries(moonshine_tts_ort PUBLIC moonshine_tts_core)
   target_include_directories(moonshine_tts_ort PRIVATE
+    ${_MOONSHINE_CORE_ROOT}
     ${_MOONSHINE_CORE_ROOT}/moonshine-utils
     ${_MOONSHINE_CORE_ROOT}/ort-utils
   )
@@ -254,6 +263,12 @@ if(MOONSHINE_TTS_BUILD_ONNX)
   moonshine_tts_set_ort_rpath(piper_voice_form_test)
   if(WIN32)
     copy_onnxruntime_dll(piper_voice_form_test)
+  endif()
+
+  moonshine_tts_add_test(piper_stream_test moonshine_tts_ort)
+  moonshine_tts_set_ort_rpath(piper_stream_test)
+  if(WIN32)
+    copy_onnxruntime_dll(piper_stream_test)
   endif()
 
   moonshine_tts_add_test(moonshine_tts_speed_test moonshine_tts_ort)

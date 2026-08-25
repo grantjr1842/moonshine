@@ -25,7 +25,7 @@ To add the library to your own app rather than starting from a sample, see [Addi
     - **[text_to_speech.py](https://github.com/moonshine-ai/moonshine/blob/main/examples/python/text_to_speech.py)** — Speak text aloud, optionally in a cloned voice.
     - **[agent_flow.py](https://github.com/moonshine-ai/moonshine/blob/main/examples/python/agent_flow.py)** — Generator-based conversational agent that walks through wifi setup by voice or keyboard.
     - **[ollama_voice.py](https://github.com/moonshine-ai/moonshine/blob/main/examples/python/ollama-voice/ollama_voice.py)** — Pipe finalized mic transcripts into a local [Ollama](https://ollama.com/) LLM and stream the reply.
-    - **[lora-training](https://github.com/moonshine-ai/moonshine/blob/main/examples/python/lora-training/)** — Train a LoRA domain adapter (`pip install 'moonshine-voice[lora]'`). Recipe in [Domain Customization](models/domain-customization.md#retraining).
+    - **[finetune](https://github.com/moonshine-ai/moonshine/blob/main/examples/python/finetune/)** — Train a domain adapter (`pip install 'moonshine-voice[finetune]'`). Recipe in [Domain Customization](models/domain-customization.md#retraining).
 
 === "iOS"
 
@@ -37,7 +37,7 @@ To add the library to your own app rather than starting from a sample, see [Addi
 
 === "Android"
 
-    Open the extracted folder in Android Studio. Samples depend on **`ai.moonshine:moonshine-voice:0.1.3`** from Maven Central.
+    Open the extracted folder in Android Studio. Samples depend on **`ai.moonshine:moonshine-voice:0.1.5`** from Maven Central.
 
     - **[Transcriber](https://github.com/moonshine-ai/moonshine/releases/latest/download/android-Transcriber.tar.gz)** — Live microphone transcription UI with partial and final results.
     - **[TextToSpeech](https://github.com/moonshine-ai/moonshine/releases/latest/download/android-TextToSpeech.tar.gz)** — Speak text with on-device TTS and optional voice cloning.

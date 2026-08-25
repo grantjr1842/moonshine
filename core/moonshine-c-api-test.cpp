@@ -9,6 +9,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "debug-utils.h"
@@ -240,9 +241,66 @@ TEST_CASE("moonshine-test-v2") {
     }
     int32_t stop_error = moonshine_stop_stream(transcriber_handle, stream_id);
     REQUIRE(stop_error == MOONSHINE_ERROR_NONE);
+    int32_t final_error = moonshine_transcribe_stream(
+        transcriber_handle, stream_id, 0, &transcript);
+    REQUIRE(final_error == MOONSHINE_ERROR_NONE);
+    REQUIRE(transcript != nullptr);
     REQUIRE(transcript->line_count > 0);
+    for (size_t j = 0; j < transcript->line_count; j++) {
+      REQUIRE(transcript->lines[j].is_complete == 1);
+    }
     LOGF("Transcript: %s", moonshine_transcript_to_string(transcript));
     moonshine_free_stream(transcriber_handle, stream_id);
+  }
+  SUBCASE("transcribe-stream-after-stop-without-partials") {
+    std::string wav_path = "two_cities.wav";
+    REQUIRE(std::filesystem::exists(wav_path));
+    float* wav_data = nullptr;
+    size_t wav_data_size = 0;
+    int32_t wav_sample_rate = 0;
+    REQUIRE(load_wav_data(wav_path.c_str(), &wav_data, &wav_data_size,
+                          &wav_sample_rate));
+    REQUIRE(wav_data != nullptr);
+    REQUIRE(wav_data_size > 0);
+    REQUIRE(wav_data_size >= static_cast<size_t>(wav_sample_rate) * 10);
+    wav_data_size = static_cast<size_t>(wav_sample_rate) * 10;
+
+    std::string root_model_path = "tiny-en";
+    REQUIRE(std::filesystem::exists(root_model_path));
+    int32_t transcriber_handle = moonshine_load_transcriber_from_files(
+        root_model_path.c_str(), MOONSHINE_MODEL_ARCH_TINY, nullptr, 0,
+        MOONSHINE_HEADER_VERSION);
+    REQUIRE(transcriber_handle >= 0);
+
+    int32_t stream_id = moonshine_create_stream(transcriber_handle, 0);
+    REQUIRE(stream_id >= 0);
+    REQUIRE(moonshine_start_stream(transcriber_handle, stream_id) ==
+            MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_transcribe_add_audio_to_stream(
+                transcriber_handle, stream_id, wav_data, wav_data_size,
+                wav_sample_rate, 0) == MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_stop_stream(transcriber_handle, stream_id) ==
+            MOONSHINE_ERROR_NONE);
+
+    struct transcript_t* transcript = nullptr;
+    REQUIRE(moonshine_transcribe_stream(transcriber_handle, stream_id, 0,
+                                        &transcript) == MOONSHINE_ERROR_NONE);
+    REQUIRE(transcript != nullptr);
+    REQUIRE(transcript->line_count > 0);
+    bool any_text = false;
+    for (size_t j = 0; j < transcript->line_count; j++) {
+      const struct transcript_line_t& line = transcript->lines[j];
+      REQUIRE(line.is_complete == 1);
+      if (line.text != nullptr && line.text[0] != '\0') {
+        any_text = true;
+      }
+    }
+    REQUIRE(any_text);
+    LOGF("Transcript after stop: %s",
+         moonshine_transcript_to_string(transcript));
+    moonshine_free_stream(transcriber_handle, stream_id);
+    moonshine_free_transcriber(transcriber_handle);
+    free(wav_data);
   }
   SUBCASE("transcribe-complete-from-memory") {
     std::string wav_path = "two_cities.wav";
@@ -1029,6 +1087,363 @@ TEST_CASE("grapheme-to-phonemizer-c-api") {
   }
 }
 
+TEST_CASE("moonshine-tts-split-utterances-c-api") {
+  SUBCASE("null-output-pointer") {
+    CHECK(moonshine_tts_split_utterances("en_us", "Hi.", nullptr, 0, nullptr) ==
+          MOONSHINE_ERROR_INVALID_ARGUMENT);
+  }
+  SUBCASE("abbreviations-do-not-split") {
+    char* json = nullptr;
+    REQUIRE(moonshine_tts_split_utterances(
+                "en_us", "Dr. Smith arrived. We left.", nullptr, 0, &json) ==
+            MOONSHINE_ERROR_NONE);
+    REQUIRE(json != nullptr);
+    const std::string out(json);
+    moonshine_free_buffer(json);
+    CHECK(out == "[\"Dr. Smith arrived.\",\"We left.\"]");
+  }
+  SUBCASE("empty-input-gives-empty-array") {
+    char* json = nullptr;
+    REQUIRE(moonshine_tts_split_utterances("en_us", "   ", nullptr, 0, &json) ==
+            MOONSHINE_ERROR_NONE);
+    REQUIRE(json != nullptr);
+    const std::string out(json);
+    moonshine_free_buffer(json);
+    CHECK(out == "[]");
+  }
+  SUBCASE("colon-split-can-be-disabled") {
+    const moonshine_option_t opts[] = {{"split_on_colon", "false"}};
+    char* json = nullptr;
+    REQUIRE(moonshine_tts_split_utterances("en_us", "Warning: hot.", opts, 1,
+                                           &json) == MOONSHINE_ERROR_NONE);
+    REQUIRE(json != nullptr);
+    const std::string out(json);
+    moonshine_free_buffer(json);
+    CHECK(out == "[\"Warning: hot.\"]");
+  }
+}
+
+TEST_CASE("moonshine-tts-streaming-c-api") {
+  SUBCASE("invalid-handles") {
+    CHECK(moonshine_tts_push_text(-1, "hi") == MOONSHINE_ERROR_INVALID_HANDLE);
+    CHECK(moonshine_tts_flush(-1) == MOONSHINE_ERROR_INVALID_HANDLE);
+    CHECK(moonshine_tts_end_input(-1) == MOONSHINE_ERROR_INVALID_HANDLE);
+    CHECK(moonshine_tts_cancel(-1) == MOONSHINE_ERROR_INVALID_HANDLE);
+    const tts_chunk_t* chunk = nullptr;
+    CHECK(moonshine_tts_next_chunk(-1, 0, &chunk) ==
+          MOONSHINE_ERROR_INVALID_HANDLE);
+    CHECK(chunk == nullptr);
+  }
+
+  const auto data_root = find_moonshine_tts_data_dir();
+  if (!data_root) {
+    MESSAGE("skip: moonshine-tts data directory not found");
+    return;
+  }
+  const std::string model_root_str = data_root->string();
+  const moonshine_option_t create_opts[] = {
+      {"model_root", model_root_str.c_str()},
+      {"lang", "en_us"},
+      {"voice", "kokoro_af_heart"},
+  };
+  const int32_t h = moonshine_create_tts_synthesizer_from_files(
+      "en_us", nullptr, 0, create_opts,
+      static_cast<uint64_t>(sizeof(create_opts) / sizeof(create_opts[0])),
+      MOONSHINE_HEADER_VERSION);
+  REQUIRE(h >= 0);
+
+  SUBCASE("reserved-flags-are-rejected") {
+    const tts_chunk_t* chunk = nullptr;
+    CHECK(moonshine_tts_next_chunk(h, 1, &chunk) ==
+          MOONSHINE_ERROR_INVALID_ARGUMENT);
+  }
+
+  SUBCASE("incremental-push-waits-for-a-complete-sentence") {
+    const tts_chunk_t* chunk = nullptr;
+    // A fragment is not enough to synthesize: prosody needs the whole clause.
+    REQUIRE(moonshine_tts_push_text(h, "Hello ") == MOONSHINE_ERROR_NONE);
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_TTS_NEED_TEXT);
+    CHECK(chunk == nullptr);
+    // The terminator plus following whitespace completes it.
+    REQUIRE(moonshine_tts_push_text(h, "there. ") == MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_ERROR_NONE);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->audio_data != nullptr);
+    CHECK(chunk->audio_data_count > 1000);
+    CHECK(chunk->sample_rate == 24000);
+    CHECK(chunk->utterance_id == 1);
+    // Text is attributed to the first chunk of an utterance. A later chunk cut
+    // on acoustic frames covers no knowable span of characters, so it carries
+    // none, and only the last is marked final.
+    CHECK(std::string(chunk->text) == "Hello there.");
+    moonshine_tts_end_input(h);
+    int8_t last_final = chunk->is_final;
+    for (int i = 0; i < 32; ++i) {
+      const tts_chunk_t* more = nullptr;
+      if (moonshine_tts_next_chunk(h, 0, &more) != MOONSHINE_ERROR_NONE) {
+        break;
+      }
+      REQUIRE(more != nullptr);
+      CHECK(more->utterance_id == 1);
+      last_final = more->is_final;
+    }
+    CHECK(last_final == 1);
+  }
+
+  SUBCASE("flush-forces-an-unterminated-fragment-out") {
+    const tts_chunk_t* chunk = nullptr;
+    REQUIRE(moonshine_tts_push_text(h, "no terminator") ==
+            MOONSHINE_ERROR_NONE);
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_TTS_NEED_TEXT);
+    REQUIRE(moonshine_tts_flush(h) == MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_ERROR_NONE);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->audio_data_count > 0);
+    moonshine_tts_cancel(h);
+  }
+
+  SUBCASE("end-of-stream-after-the-queue-drains") {
+    REQUIRE(moonshine_tts_push_text(h, "One. Two.") == MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_tts_end_input(h) == MOONSHINE_ERROR_NONE);
+    std::vector<uint64_t> ids;
+    for (int i = 0; i < 32; ++i) {
+      const tts_chunk_t* chunk = nullptr;
+      const int32_t status = moonshine_tts_next_chunk(h, 0, &chunk);
+      if (status == MOONSHINE_TTS_END_OF_STREAM) {
+        break;
+      }
+      REQUIRE(status == MOONSHINE_ERROR_NONE);
+      REQUIRE(chunk != nullptr);
+      ids.push_back(chunk->utterance_id);
+    }
+    REQUIRE(ids.size() >= 2);
+    CHECK(ids.front() == 1);
+    CHECK(ids.back() == 2);
+    // Draining returns the synthesizer to idle without anything to release.
+    CHECK(moonshine_tts_is_streaming(h) == 0);
+  }
+
+  SUBCASE("streamed-audio-is-the-same-length-and-level-as-the-whole-render") {
+    const char* text =
+        "The old lighthouse stood alone against the crashing waves.";
+    // Both sides have to be raw for this to compare like with like. With
+    // normalization on they are scaled by different things on purpose: the
+    // whole render by its own peak, which streaming cannot know before it has
+    // decoded everything, and the stream by its voice's measured level.
+    const moonshine_option_t plain_opts[] = {
+        {"model_root", model_root_str.c_str()},
+        {"lang", "en_us"},
+        {"voice", "kokoro_af_heart"},
+        {"normalize_audio", "false"},
+    };
+    const int32_t plain_h = moonshine_create_tts_synthesizer_from_files(
+        "en_us", nullptr, 0, plain_opts,
+        sizeof(plain_opts) / sizeof(plain_opts[0]), MOONSHINE_HEADER_VERSION);
+    REQUIRE(plain_h >= 0);
+    float* whole = nullptr;
+    uint64_t whole_n = 0;
+    int32_t whole_sr = 0;
+    REQUIRE(moonshine_text_to_speech(plain_h, text, nullptr, 0, &whole,
+                                     &whole_n,
+                                     &whole_sr) == MOONSHINE_ERROR_NONE);
+    REQUIRE(whole != nullptr);
+
+    REQUIRE(moonshine_tts_push_text(plain_h, text) == MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_tts_end_input(plain_h) == MOONSHINE_ERROR_NONE);
+    std::vector<float> streamed;
+    for (int i = 0; i < 64; ++i) {
+      const tts_chunk_t* chunk = nullptr;
+      if (moonshine_tts_next_chunk(plain_h, 0, &chunk) !=
+          MOONSHINE_ERROR_NONE) {
+        break;
+      }
+      streamed.insert(streamed.end(), chunk->audio_data,
+                      chunk->audio_data + chunk->audio_data_count);
+    }
+    moonshine_free_tts_synthesizer(plain_h);
+
+    // Not a sample-for-sample comparison. The decoder normalizes over whatever
+    // span it is given and its excitation restarts per chunk, so a chunked
+    // render is a different render of the same words. What has to hold is that
+    // it lasts about as long and comes out at the same level. Linux x86_64
+    // ORT can differ from Apple Silicon by one 50 ms Kokoro frame (1200
+    // samples at 24 kHz); that is still the same utterance.
+    const auto whole_len = static_cast<long long>(whole_n);
+    const auto stream_len = static_cast<long long>(streamed.size());
+    REQUIRE(std::llabs(stream_len - whole_len) <= 1200);
+    const uint64_t n =
+        std::min(whole_n, static_cast<uint64_t>(streamed.size()));
+    double whole_energy = 0.0;
+    double streamed_energy = 0.0;
+    for (uint64_t i = 0; i < n; ++i) {
+      whole_energy += static_cast<double>(whole[i]) * whole[i];
+      streamed_energy += static_cast<double>(streamed[i]) * streamed[i];
+    }
+    const double ratio_db = 10.0 * std::log10(std::max(streamed_energy, 1e-12) /
+                                              std::max(whole_energy, 1e-12));
+    CHECK(std::fabs(ratio_db) < 1.5);
+    std::free(whole);
+  }
+
+  SUBCASE("normalizing-a-stream-applies-one-gain-to-the-whole-utterance") {
+    // Streaming stands in for peak normalization with a level measured offline
+    // for the voice. The point of measuring it per voice rather than per chunk
+    // is that one gain covers the utterance, so it must scale peak and RMS by
+    // the same amount; a per-chunk gain would move them apart.
+    const char* text =
+        "The old lighthouse stood alone against the crashing waves.";
+    const auto stream_levels = [&text](int32_t handle) {
+      REQUIRE(moonshine_tts_push_text(handle, text) == MOONSHINE_ERROR_NONE);
+      REQUIRE(moonshine_tts_end_input(handle) == MOONSHINE_ERROR_NONE);
+      double peak = 0.0;
+      double sum_sq = 0.0;
+      size_t count = 0;
+      for (int i = 0; i < 64; ++i) {
+        const tts_chunk_t* chunk = nullptr;
+        if (moonshine_tts_next_chunk(handle, 0, &chunk) !=
+            MOONSHINE_ERROR_NONE) {
+          break;
+        }
+        for (uint64_t s = 0; s < chunk->audio_data_count; ++s) {
+          const double x = chunk->audio_data[s];
+          peak = std::max(peak, std::fabs(x));
+          sum_sq += x * x;
+        }
+        count += chunk->audio_data_count;
+      }
+      REQUIRE(count > 0);
+      return std::pair<double, double>{peak, std::sqrt(sum_sq / double(count))};
+    };
+
+    const moonshine_option_t plain_opts[] = {
+        {"model_root", model_root_str.c_str()},
+        {"lang", "en_us"},
+        {"voice", "kokoro_af_heart"},
+        {"normalize_audio", "false"},
+    };
+    const int32_t plain_h = moonshine_create_tts_synthesizer_from_files(
+        "en_us", nullptr, 0, plain_opts,
+        sizeof(plain_opts) / sizeof(plain_opts[0]), MOONSHINE_HEADER_VERSION);
+    REQUIRE(plain_h >= 0);
+    const auto [raw_peak, raw_rms] = stream_levels(plain_h);
+    moonshine_free_tts_synthesizer(plain_h);
+
+    const auto [norm_peak, norm_rms] = stream_levels(h);
+
+    // Normalizing brings af_heart up, so the gain is above one.
+    CHECK(norm_peak > raw_peak);
+    const double peak_gain_db = 20.0 * std::log10(norm_peak / raw_peak);
+    const double rms_gain_db = 20.0 * std::log10(norm_rms / raw_rms);
+    CHECK(std::fabs(peak_gain_db - rms_gain_db) < 0.5);
+  }
+
+  SUBCASE("a-long-utterance-is-cut-into-growing-chunks") {
+    REQUIRE(moonshine_tts_push_text(
+                h,
+                "The old lighthouse stood alone against the crashing waves of "
+                "the north sea, its lamp turning slowly through the fog.") ==
+            MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_tts_end_input(h) == MOONSHINE_ERROR_NONE);
+    std::vector<uint64_t> sizes;
+    for (int i = 0; i < 64; ++i) {
+      const tts_chunk_t* chunk = nullptr;
+      if (moonshine_tts_next_chunk(h, 0, &chunk) != MOONSHINE_ERROR_NONE) {
+        break;
+      }
+      sizes.push_back(chunk->audio_data_count);
+    }
+    // Only where the Kokoro stage models are installed. Elsewhere this is one
+    // chunk for the sentence, which is still a valid way to stream it.
+    if (sizes.size() > 2) {
+      // The first chunk is the only one that delays playback, so it is short;
+      // later ones grow, which is what keeps the decoder's level steady.
+      CHECK(sizes.front() < sizes[1]);
+      CHECK(sizes[1] < sizes[2]);
+      CHECK(sizes.front() < 24000);
+    }
+  }
+
+  SUBCASE("cancel-drops-queued-text-and-returns-to-idle") {
+    REQUIRE(moonshine_tts_push_text(h, "Discard this. And this. ") ==
+            MOONSHINE_ERROR_NONE);
+    CHECK(moonshine_tts_is_streaming(h) == 1);
+    REQUIRE(moonshine_tts_cancel(h) == MOONSHINE_ERROR_NONE);
+    CHECK(moonshine_tts_is_streaming(h) == 0);
+    const tts_chunk_t* chunk = nullptr;
+    // The consumer is told the reply was abandoned rather than left to guess
+    // from the audio stopping, and is told once.
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_TTS_CANCELLED);
+    CHECK(chunk == nullptr);
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_TTS_NEED_TEXT);
+    REQUIRE(moonshine_tts_push_text(h, "Say this instead. ") ==
+            MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_ERROR_NONE);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->audio_data_count > 0);
+    moonshine_tts_cancel(h);
+  }
+
+  SUBCASE("cancelling-an-idle-synthesizer-reports-nothing") {
+    // Cancel is safe to call unconditionally, so a caller that cancels on every
+    // turn boundary must not see a phantom interruption.
+    REQUIRE(moonshine_tts_cancel(h) == MOONSHINE_ERROR_NONE);
+    const tts_chunk_t* chunk = nullptr;
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_TTS_NEED_TEXT);
+  }
+
+  SUBCASE("cancel-part-way-through-a-reply-reports-cancelled") {
+    REQUIRE(moonshine_tts_push_text(
+                h,
+                "The old lighthouse stood alone against the crashing waves of "
+                "the north sea, its lamp turning slowly through the fog. ") ==
+            MOONSHINE_ERROR_NONE);
+    const tts_chunk_t* chunk = nullptr;
+    REQUIRE(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_ERROR_NONE);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->is_final == 0);
+    REQUIRE(moonshine_tts_cancel(h) == MOONSHINE_ERROR_NONE);
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_TTS_CANCELLED);
+    CHECK(chunk == nullptr);
+  }
+
+  SUBCASE("the-cancelled-status-has-a-name") {
+    CHECK(std::string(moonshine_error_to_string(MOONSHINE_TTS_CANCELLED)) !=
+          "Unknown error");
+  }
+
+  SUBCASE("a-one-shot-call-is-refused-while-streaming") {
+    REQUIRE(moonshine_tts_push_text(h, "Mid reply. ") == MOONSHINE_ERROR_NONE);
+    float* audio = nullptr;
+    uint64_t count = 0;
+    int32_t rate = 0;
+    CHECK(moonshine_text_to_speech(h, "Something else.", nullptr, 0, &audio,
+                                   &count, &rate) == MOONSHINE_ERROR_BUSY);
+    CHECK(audio == nullptr);
+    // Cancelling the reply hands the model back.
+    REQUIRE(moonshine_tts_cancel(h) == MOONSHINE_ERROR_NONE);
+    REQUIRE(moonshine_text_to_speech(h, "Something else.", nullptr, 0, &audio,
+                                     &count, &rate) == MOONSHINE_ERROR_NONE);
+    CHECK(count > 0);
+    std::free(audio);
+  }
+
+  SUBCASE("freeing-one-synthesizer-leaves-another-streaming") {
+    REQUIRE(moonshine_tts_push_text(h, "Still here. ") == MOONSHINE_ERROR_NONE);
+    const int32_t h2 = moonshine_create_tts_synthesizer_from_files(
+        "en_us", nullptr, 0, create_opts,
+        static_cast<uint64_t>(sizeof(create_opts) / sizeof(create_opts[0])),
+        MOONSHINE_HEADER_VERSION);
+    REQUIRE(h2 >= 0);
+    moonshine_free_tts_synthesizer(h2);
+    CHECK(moonshine_tts_is_streaming(h) == 1);
+    const tts_chunk_t* chunk = nullptr;
+    CHECK(moonshine_tts_next_chunk(h, 0, &chunk) == MOONSHINE_ERROR_NONE);
+    moonshine_tts_cancel(h);
+  }
+
+  moonshine_free_tts_synthesizer(h);
+}
+
 TEST_CASE("moonshine-tts-g2p-dependency-api") {
   SUBCASE("null-output-pointer") {
     CHECK(moonshine_get_g2p_dependencies("en_us", nullptr, 0, nullptr) ==
@@ -1149,7 +1564,16 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
     const std::string json(out);
     CHECK(json.size() >= 2);
     CHECK(json.find("\"groups\"") != std::string::npos);
-    CHECK(json.find("\"kokoro/model.ort\"") != std::string::npos);
+    // Kokoro ships as two stages, each a split ORT pair, and no
+    // whole-utterance model: running the stages back to back is what serves
+    // that path now, so fetching one as well would double the download.
+    CHECK(json.find("\"kokoro/prosody.model.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/prosody.weights.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/decoder.model.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/decoder.weights.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/model.model.ort\"") == std::string::npos);
+    CHECK(json.find("\"kokoro/model.weights.ort\"") == std::string::npos);
+    CHECK(json.find("\"kokoro/model.ort\"") == std::string::npos);
     CHECK(json.find("\"en_us/dict_filtered_heteronyms.tsv\"") !=
           std::string::npos);
     std::free(out);
@@ -1162,7 +1586,8 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
     REQUIRE(out != nullptr);
     const std::string json(out);
     CHECK(json.find("\"groups\"") != std::string::npos);
-    CHECK(json.find("\"kokoro/model.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/prosody.model.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/decoder.model.ort\"") != std::string::npos);
     std::free(out);
   }
 
@@ -1197,7 +1622,7 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
     REQUIRE(out != nullptr);
     const std::string json(out);
     CHECK(json.find("piper-voices") != std::string::npos);
-    CHECK(json.find("kokoro/model.ort") == std::string::npos);
+    CHECK(json.find("kokoro/model") == std::string::npos);
     std::free(out);
   }
 
@@ -1210,7 +1635,8 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
             MOONSHINE_ERROR_NONE);
     REQUIRE(out != nullptr);
     const std::string json(out);
-    CHECK(json.find("\"kokoro/model.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/prosody.model.ort\"") != std::string::npos);
+    CHECK(json.find("\"kokoro/decoder.model.ort\"") != std::string::npos);
     CHECK(json.find("piper-voices") == std::string::npos);
     std::free(out);
   }
@@ -1239,10 +1665,19 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
             MOONSHINE_ERROR_NONE);
     REQUIRE(out != nullptr);
     const std::string json(out);
-    // A quantized voice ships as a split ORT pair; the config keeps the
-    // ``.onnx.json`` name whatever form the model takes.
-    CHECK(json.find("de_DE-thorsten-medium.model.ort") != std::string::npos);
-    CHECK(json.find("de_DE-thorsten-medium.weights.ort") != std::string::npos);
+    // A voice ships as two stages, and a quantized one has each of those as a
+    // split ORT pair. The config keeps the ``.onnx.json`` name whatever form
+    // the model takes.
+    CHECK(json.find("de_DE-thorsten-medium.upstream.model.ort") !=
+          std::string::npos);
+    CHECK(json.find("de_DE-thorsten-medium.upstream.weights.ort") !=
+          std::string::npos);
+    CHECK(json.find("de_DE-thorsten-medium.generator.model.ort") !=
+          std::string::npos);
+    CHECK(json.find("de_DE-thorsten-medium.generator.weights.ort") !=
+          std::string::npos);
+    CHECK(json.find("\"de_DE-thorsten-medium.model.ort\"") ==
+          std::string::npos);
     CHECK(json.find("de_DE-thorsten-medium.onnx.json") != std::string::npos);
     std::free(out);
   }
@@ -1256,8 +1691,9 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
             MOONSHINE_ERROR_NONE);
     REQUIRE(out != nullptr);
     const std::string json(out);
-    CHECK(json.find("en_US-saikat.ort") != std::string::npos);
-    CHECK(json.find("en_US-saikat.model.ort") == std::string::npos);
+    CHECK(json.find("en_US-saikat.upstream.ort") != std::string::npos);
+    CHECK(json.find("en_US-saikat.generator.ort") != std::string::npos);
+    CHECK(json.find("en_US-saikat.upstream.model.ort") == std::string::npos);
     std::free(out);
   }
 
@@ -1359,7 +1795,7 @@ TEST_CASE("moonshine-tts-g2p-dependency-api") {
     CHECK(json.find("\"zipvoice/fm_decoder.ort\"") != std::string::npos);
     CHECK(json.find("\"zipvoice/vocoder.ort\"") != std::string::npos);
     CHECK(json.find("\"zipvoice/tokens.txt\"") != std::string::npos);
-    CHECK(json.find("\"kokoro/model.ort\"") == std::string::npos);
+    CHECK(json.find("kokoro/model") == std::string::npos);
     CHECK(json.find("piper-voices") == std::string::npos);
     CHECK(json.find("\"role\":\"clone_asr\"") != std::string::npos);
     CHECK(json.find("\"clone_asr/") != std::string::npos);
@@ -1423,8 +1859,10 @@ TEST_CASE("moonshine-stt-embedding-dependency-api") {
     const std::string json(out);
     CHECK(json.find("\"groups\"") != std::string::npos);
     CHECK(json.find("\"https://download.moonshine.ai/model/medium-streaming-en/"
-                    "quantized_26_07_30\"") != std::string::npos);
+                    "quantized_26_08_21\"") != std::string::npos);
     CHECK(json.find("\"adapter.ort\"") != std::string::npos);
+    CHECK(json.find("\"frontend.model.ort\"") != std::string::npos);
+    CHECK(json.find("\"frontend.weights.ort\"") != std::string::npos);
     CHECK(json.find("\"decoder_kv.ort\"") != std::string::npos);
     CHECK(json.find("\"streaming_config.json\"") != std::string::npos);
     // The attention decoder is only for word timestamps, so it is omitted
@@ -1575,8 +2013,12 @@ TEST_CASE("moonshine-stt-embedding-dependency-api") {
   }
 
   SUBCASE("stt-unknown-arch-for-language") {
+    // Base streaming (3) is the one architecture the catalog publishes for no
+    // language at all, so it stays an unpublished combination as languages gain
+    // models. This subcase previously asked for tiny streaming on Spanish,
+    // which stopped being unpublished the moment Spanish shipped one.
     const moonshine_option_t opts[] = {
-        {"model_arch", "2"},  // streaming arch not published for Spanish
+        {"model_arch", "3"},
     };
     char* out = nullptr;
     CHECK(moonshine_get_stt_dependencies("es", opts, 1, &out) ==
@@ -1635,17 +2077,31 @@ TEST_CASE("moonshine-stt-embedding-dependency-api") {
     std::free(out);
   }
 
-  SUBCASE("embedding-fp32-uses-bare-model-ort") {
-    const moonshine_option_t opts[] = {
-        {"variant", "fp32"},
-    };
-    char* out = nullptr;
-    REQUIRE(moonshine_get_embedding_dependencies("embeddinggemma-300m", opts, 1,
-                                                 &out) == MOONSHINE_ERROR_NONE);
-    REQUIRE(out != nullptr);
-    const std::string json(out);
-    CHECK(json.find("\"model.ort\"") != std::string::npos);
-    std::free(out);
+  SUBCASE("embedding-removed-variants-are-no-longer-supported") {
+    const char* removed[] = {"fp32", "fp16", "q4f16"};
+    for (const char* variant : removed) {
+      const moonshine_option_t opts[] = {
+          {"variant", variant},
+      };
+      char* out = nullptr;
+      CHECK(moonshine_get_embedding_dependencies("embeddinggemma-300m", opts, 1,
+                                                 &out) ==
+            MOONSHINE_ERROR_INVALID_ARGUMENT);
+      CHECK(out == nullptr);
+
+      CHECK(moonshine_create_embedding_model(
+                "/unused", MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M,
+                variant) == MOONSHINE_ERROR_INVALID_ARGUMENT);
+
+      const char* names[] = {"model.ort"};
+      const uint8_t dummy = 0;
+      const uint8_t* memory[] = {&dummy};
+      const uint64_t sizes[] = {1};
+      CHECK(moonshine_create_embedding_model_from_memory(
+                MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M, variant, names, 1,
+                memory, sizes, nullptr, 0,
+                MOONSHINE_HEADER_VERSION) == MOONSHINE_ERROR_INVALID_ARGUMENT);
+    }
   }
 
   SUBCASE("embedding-unknown-model") {
@@ -1704,6 +2160,9 @@ TEST_CASE("moonshine-catalog-listing-api") {
           std::string::npos);
     CHECK(json.find("\"variants\":") != std::string::npos);
     CHECK(json.find("\"default_variant\":\"q4\"") != std::string::npos);
+    CHECK(json.find("\"fp32\"") == std::string::npos);
+    CHECK(json.find("\"fp16\"") == std::string::npos);
+    CHECK(json.find("\"q4f16\"") == std::string::npos);
     std::free(out);
   }
 }

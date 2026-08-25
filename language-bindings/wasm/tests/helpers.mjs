@@ -19,9 +19,22 @@ export const TINY_EN_DIR = path.join(TEST_ASSETS, 'tiny-en');
 export const TINY_STREAMING_EN_DIR = path.join(TEST_ASSETS, 'tiny-streaming-en');
 
 // Canonical manifest filenames the streaming loader expects, in the order the
-// other bindings copy them.
+// other bindings copy them. frontend.ort is the pre-split pin; a converted
+// frontend ships as frontend.model.ort + frontend.weights.ort instead.
 const TINY_STREAMING_EN_FILES = [
   'frontend.ort',
+  'frontend.model.ort',
+  'frontend.weights.ort',
+  'encoder.ort',
+  'adapter.ort',
+  'cross_kv.ort',
+  'decoder_kv.ort',
+  'decoder_kv_with_attention.ort',
+  'streaming_config.json',
+  'tokenizer.bin',
+];
+
+const TINY_STREAMING_EN_REQUIRED = [
   'encoder.ort',
   'adapter.ort',
   'cross_kv.ort',
@@ -51,8 +64,7 @@ export function importApi() {
 }
 
 /**
- * Imports a built module that the package deliberately does not re-export, e.g.
- * `'embedding-model.js'`, which AgentFlow owns on the caller's behalf.
+ * Imports a built module that the package deliberately does not re-export.
  */
 export function importInternal(file) {
   return import(path.join(DIST, file));
@@ -61,7 +73,12 @@ export function importInternal(file) {
 /** Loads the raw embind module directly (for low-level surface checks). */
 export async function loadRawModule() {
   const factory = (await import(path.join(DIST, 'moonshine.mjs'))).default;
-  return factory({ locateFile });
+  const mod = await factory({ locateFile });
+  // Tests that build engines through the TS classes still want readable
+  // messages when the native side throws.
+  const { registerErrorModule } = await import(path.join(DIST, 'errors.js'));
+  registerErrorModule(mod);
+  return mod;
 }
 
 /**
@@ -121,8 +138,14 @@ export function tinyEnBytes() {
 }
 
 export function tinyStreamingEnAvailable() {
-  return TINY_STREAMING_EN_FILES.every((name) =>
-    fileExists(path.join(TINY_STREAMING_EN_DIR, name)),
+  const dir = TINY_STREAMING_EN_DIR;
+  const hasFrontend =
+    fileExists(path.join(dir, 'frontend.ort')) ||
+    (fileExists(path.join(dir, 'frontend.model.ort')) &&
+      fileExists(path.join(dir, 'frontend.weights.ort')));
+  return (
+    hasFrontend &&
+    TINY_STREAMING_EN_REQUIRED.every((name) => fileExists(path.join(dir, name)))
   );
 }
 
@@ -130,7 +153,10 @@ export function tinyStreamingEnAvailable() {
 export function tinyStreamingEnFiles() {
   const files = {};
   for (const name of TINY_STREAMING_EN_FILES) {
-    files[name] = fs.readFileSync(path.join(TINY_STREAMING_EN_DIR, name));
+    const filePath = path.join(TINY_STREAMING_EN_DIR, name);
+    if (fileExists(filePath)) {
+      files[name] = fs.readFileSync(filePath);
+    }
   }
   return files;
 }

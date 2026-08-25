@@ -15,11 +15,20 @@ bool bundled_tts_data_present(const std::filesystem::path& root) {
   namespace fs = std::filesystem;
   const fs::path voices = root / "en_us" / "piper-voices";
   // Voices ship as a split ORT pair or a single .ort.
+  // A Piper voice ships as two stages, each of which is a split ORT pair or a
+  // single .ort.
   const bool have_lessac =
-      fs::is_regular_file(voices / "en_US-lessac-medium.model.ort") ||
-      fs::is_regular_file(voices / "en_US-lessac-medium.ort");
-  return fs::is_regular_file(root / "kokoro" / "model.ort") &&
-         fs::is_regular_file(root / "kokoro" / "config.json") && have_lessac;
+      fs::is_regular_file(voices / "en_US-lessac-medium.upstream.model.ort") ||
+      fs::is_regular_file(voices / "en_US-lessac-medium.upstream.ort");
+  // Kokoro ships as two stages, and a whole-utterance model is still accepted.
+  const bool have_kokoro =
+      (fs::is_regular_file(root / "kokoro" / "prosody.model.ort") &&
+       fs::is_regular_file(root / "kokoro" / "decoder.model.ort")) ||
+      (fs::is_regular_file(root / "kokoro" / "model.model.ort") &&
+       fs::is_regular_file(root / "kokoro" / "model.weights.ort")) ||
+      fs::is_regular_file(root / "kokoro" / "model.ort");
+  return have_kokoro && fs::is_regular_file(root / "kokoro" / "config.json") &&
+         have_lessac;
 }
 
 }  // namespace

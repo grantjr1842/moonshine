@@ -5,7 +5,7 @@ REPO_ROOT_DIR="$(dirname "${SCRIPTS_DIR}")"
 SWIFT_DIR="${REPO_ROOT_DIR}/language-bindings/swift"
 
 FRAMEWORK_NAME="Moonshine"
-VERSION="0.1.3"
+VERSION="0.1.5"
 REPO="moonshine-ai/moonshine-swift"
 TAG="v${VERSION}"
 
@@ -33,7 +33,9 @@ cd $TMP_DIR
 
 ZIP_NAME="$FRAMEWORK_NAME.xcframework.zip"
 rm -f "${ZIP_NAME}"
-zip -r $ZIP_NAME $FRAMEWORK_NAME.xcframework
+# Exclude test-assets if a stale xcframework still carries them: GitHub
+# rejects release assets at 2 GB, and three copies of the tree exceed that.
+zip -r $ZIP_NAME $FRAMEWORK_NAME.xcframework -x '*test-assets*' '*test-assets/*'
 
 echo "Computing checksum..."
 CHECKSUM=$(swift package compute-checksum "$ZIP_NAME")

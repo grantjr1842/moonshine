@@ -14,8 +14,10 @@
 #endif
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 #include "bin-tokenizer.h"
 #include "moonshine-ort-allocator.h"
@@ -24,6 +26,18 @@
 #define DEBUG_ALLOC_ENABLED 1
 #include "debug-utils.h"
 #include "ort-utils.h"
+
+#ifndef _WIN32
+namespace {
+void unmap_model(const char **data, size_t *size) {
+  if (*data != nullptr) {
+    munmap(const_cast<char *>(*data), *size);
+    *data = nullptr;
+    *size = 0;
+  }
+}
+}  // namespace
+#endif
 
 // Streaming model constants
 #define MOONSHINE_STREAMING_TINY_ENCODER_DIM 288
@@ -55,6 +69,21 @@ const char *kSpaceString = "▁";
 // Contextual biasing was the first caller to encode text, and it was waiting on
 // subwords the decoder never emits.
 const BinTokenizerEncoding kTokenizerEncoding = BinTokenizerEncoding::kBpe;
+
+// When the encoder has not emitted memory yet (lookahead still filling, or a
+// new segment just reset), decoding is a no-op. Point argmax at EOS so a
+// caller that ignores the empty-memory case still stops instead of reading
+// uninitialized logits.
+void write_empty_decode_logits(const MoonshineStreamingConfig &config,
+                               float *logits_out) {
+  if (logits_out == nullptr || config.vocab_size <= 0) {
+    return;
+  }
+  std::fill(logits_out, logits_out + config.vocab_size, 0.0f);
+  if (config.eos_id >= 0 && config.eos_id < config.vocab_size) {
+    logits_out[config.eos_id] = 1.0f;
+  }
+}
 
 }  // namespace
 
@@ -180,8 +209,7 @@ MoonshineStreamingModel::MoonshineStreamingModel(
 
   LOG_ORT_ERROR(ort_api, ort_api->CreateSessionOptions(&ort_session_options));
   ort_maybe_force_single_thread(ort_api, ort_session_options);
-  LOG_ORT_ERROR(ort_api, ort_api->SetSessionGraphOptimizationLevel(
-                             ort_session_options, ORT_ENABLE_ALL));
+  ort_configure_ort_file_session(ort_api, ort_session_options);
   ort_configure_execution_providers(ort_api, ort_session_options,
                                     ort_provider_names, coreml_cache_dir);
 
@@ -200,16 +228,11 @@ MoonshineStreamingModel::~MoonshineStreamingModel() {
   delete ort_allocator;
   delete tokenizer;
 #ifndef _WIN32
-  if (frontend_mmapped_data) {
-    munmap(const_cast<char *>(frontend_mmapped_data),
-           frontend_mmapped_data_size);
-  }
-  if (encoder_mmapped_data) {
-    munmap(const_cast<char *>(encoder_mmapped_data), encoder_mmapped_data_size);
-  }
-  if (adapter_mmapped_data) {
-    munmap(const_cast<char *>(adapter_mmapped_data), adapter_mmapped_data_size);
-  }
+  unmap_model(&frontend_mmapped_data, &frontend_mmapped_data_size);
+  unmap_model(&encoder_mmapped_data, &encoder_mmapped_data_size);
+  unmap_model(&adapter_mmapped_data, &adapter_mmapped_data_size);
+  unmap_model(&cross_kv_mmapped_data, &cross_kv_mmapped_data_size);
+  unmap_model(&decoder_kv_mmapped_data, &decoder_kv_mmapped_data_size);
 #endif
 }
 
@@ -230,6 +253,119 @@ int MoonshineStreamingModel::load_config_from_string(const std::string &json) {
   return 0;
 }
 
+int MoonshineStreamingModel::collect_frontend_split_weights(
+    OrtSession *weights_session) {
+  frontend_split_weights.clear();
+  size_t count = 0;
+  RETURN_ON_ORT_ERROR(ort_api,
+                      ort_api->SessionGetOutputCount(weights_session, &count));
+  if (count == 0) {
+    LOG("frontend weights model produced no outputs\n");
+    return 1;
+  }
+
+  std::vector<char *> names_alloc(count, nullptr);
+  std::vector<const char *> names(count, nullptr);
+  for (size_t i = 0; i < count; ++i) {
+    RETURN_ON_ORT_ERROR(ort_api, ort_api->SessionGetOutputName(
+                                     weights_session, i, &ort_allocator->base,
+                                     &names_alloc[i]));
+    names[i] = names_alloc[i];
+  }
+
+  std::vector<OrtValue *> outputs(count, nullptr);
+  OrtStatus *status = ORT_RUN(ort_api, weights_session, nullptr, nullptr, 0,
+                              names.data(), count, outputs.data());
+  if (status != nullptr) {
+    LOG_ORT_ERROR(ort_api, status);
+    for (char *n : names_alloc) {
+      if (n != nullptr) {
+        ort_allocator->base.Free(&ort_allocator->base, n);
+      }
+    }
+    return 1;
+  }
+
+  frontend_split_weights.reserve(count);
+  int err = 0;
+  for (size_t i = 0; i < count; ++i) {
+    OrtTensorTypeAndShapeInfo *info = nullptr;
+    OrtStatus *info_status = ort_api->GetTensorTypeAndShape(outputs[i], &info);
+    if (info_status != nullptr) {
+      LOG_ORT_ERROR(ort_api, info_status);
+      err = 1;
+      break;
+    }
+    ONNXTensorElementDataType dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    RETURN_ON_ORT_ERROR(ort_api, ort_api->GetTensorElementType(info, &dtype));
+    size_t n_dims = 0;
+    RETURN_ON_ORT_ERROR(ort_api, ort_api->GetDimensionsCount(info, &n_dims));
+    FrontendSplitWeight weight;
+    weight.name = names[i];
+    weight.shape.resize(n_dims);
+    RETURN_ON_ORT_ERROR(
+        ort_api, ort_api->GetDimensions(info, weight.shape.data(), n_dims));
+    ort_api->ReleaseTensorTypeAndShapeInfo(info);
+    if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      LOGF("frontend split weight %s is not float32\n", weight.name.c_str());
+      err = 1;
+      break;
+    }
+    float *src = nullptr;
+    OrtStatus *data_status =
+        ort_api->GetTensorMutableData(outputs[i], (void **)&src);
+    if (data_status != nullptr) {
+      LOG_ORT_ERROR(ort_api, data_status);
+      err = 1;
+      break;
+    }
+    size_t elements = 1;
+    for (int64_t dim : weight.shape) {
+      elements *= static_cast<size_t>(dim);
+    }
+    weight.data.assign(src, src + elements);
+    frontend_split_weights.push_back(std::move(weight));
+  }
+
+  for (OrtValue *value : outputs) {
+    if (value != nullptr) {
+      ort_api->ReleaseValue(value);
+    }
+  }
+  for (char *n : names_alloc) {
+    if (n != nullptr) {
+      ort_allocator->base.Free(&ort_allocator->base, n);
+    }
+  }
+  return err;
+}
+
+int MoonshineStreamingModel::load_frontend_split_weights_from_memory(
+    const uint8_t *data, size_t size) {
+  OrtSession *weights_session = nullptr;
+  RETURN_ON_ERROR(ort_session_from_memory(ort_api, ort_env, ort_session_options,
+                                          data, size, &weights_session));
+  const int err = collect_frontend_split_weights(weights_session);
+  ort_api->ReleaseSession(weights_session);
+  return err;
+}
+
+int MoonshineStreamingModel::load_frontend_split_weights_from_path(
+    const char *path) {
+  OrtSession *weights_session = nullptr;
+  const char *mapped = nullptr;
+  size_t mapped_size = 0;
+  RETURN_ON_ERROR(ort_session_from_path(ort_api, ort_env, ort_session_options,
+                                        path, &weights_session, &mapped,
+                                        &mapped_size));
+  const int err = collect_frontend_split_weights(weights_session);
+  ort_api->ReleaseSession(weights_session);
+#ifndef _WIN32
+  unmap_model(&mapped, &mapped_size);
+#endif
+  return err;
+}
+
 int MoonshineStreamingModel::load(const char *model_dir,
                                   const char *tokenizer_path,
                                   int32_t /* model_type */) {
@@ -239,6 +375,10 @@ int MoonshineStreamingModel::load(const char *model_dir,
   }
 
   // Build paths
+  std::string frontend_model_path =
+      append_path_component(model_dir, "frontend.model.ort");
+  std::string frontend_weights_path =
+      append_path_component(model_dir, "frontend.weights.ort");
   std::string frontend_path = append_path_component(model_dir, "frontend.ort");
   std::string encoder_path = append_path_component(model_dir, "encoder.ort");
   std::string adapter_path = append_path_component(model_dir, "adapter.ort");
@@ -248,11 +388,26 @@ int MoonshineStreamingModel::load(const char *model_dir,
   // Load config
   RETURN_ON_ERROR(load_config(config_path.c_str()));
 
-  // Load sessions using ort_session_from_path (same as non-streaming)
-  RETURN_ON_ERROR(ort_session_from_path(
-      ort_api, ort_env, ort_session_options, frontend_path.c_str(),
-      &frontend_session, &frontend_mmapped_data, &frontend_mmapped_data_size));
-  RETURN_ON_NULL(frontend_session);
+  // Prefer the split pair so int8 weights survive ORT conversion. Fall back
+  // to a single frontend.ort for pins published before the split.
+  const bool split_frontend =
+      std::filesystem::is_regular_file(frontend_model_path) &&
+      std::filesystem::is_regular_file(frontend_weights_path);
+  if (split_frontend) {
+    RETURN_ON_ERROR(ort_session_from_path(
+        ort_api, ort_env, ort_session_options, frontend_model_path.c_str(),
+        &frontend_session, &frontend_mmapped_data,
+        &frontend_mmapped_data_size));
+    RETURN_ON_NULL(frontend_session);
+    RETURN_ON_ERROR(
+        load_frontend_split_weights_from_path(frontend_weights_path.c_str()));
+  } else {
+    RETURN_ON_ERROR(ort_session_from_path(
+        ort_api, ort_env, ort_session_options, frontend_path.c_str(),
+        &frontend_session, &frontend_mmapped_data,
+        &frontend_mmapped_data_size));
+    RETURN_ON_NULL(frontend_session);
+  }
 
   RETURN_ON_ERROR(ort_session_from_path(
       ort_api, ort_env, ort_session_options, encoder_path.c_str(),
@@ -269,31 +424,40 @@ int MoonshineStreamingModel::load(const char *model_dir,
   std::string decoder_kv_path =
       append_path_component(model_dir, "decoder_kv.ort");
 
-  // Load cross_kv (required)
-  {
-    const char *cross_kv_mmap = nullptr;
-    size_t cross_kv_mmap_size = 0;
-    RETURN_ON_ERROR(ort_session_from_path(
-        ort_api, ort_env, ort_session_options, cross_kv_path.c_str(),
-        &cross_kv_session, &cross_kv_mmap, &cross_kv_mmap_size));
-    RETURN_ON_NULL(cross_kv_session);
-  }
+  // Load cross_kv (required). Keep the mapping on the model so the destructor
+  // can munmap it; a local pointer here is how issue #216 leaked ~83 MB per
+  // Transcriber.
+  RETURN_ON_ERROR(ort_session_from_path(
+      ort_api, ort_env, ort_session_options, cross_kv_path.c_str(),
+      &cross_kv_session, &cross_kv_mmapped_data, &cross_kv_mmapped_data_size));
+  RETURN_ON_NULL(cross_kv_session);
 
-  // Load decoder_kv (required)
-  {
-    const char *decoder_kv_mmap = nullptr;
-    size_t decoder_kv_mmap_size = 0;
-    RETURN_ON_ERROR(ort_session_from_path(
-        ort_api, ort_env, ort_session_options, decoder_kv_path.c_str(),
-        &decoder_kv_session, &decoder_kv_mmap, &decoder_kv_mmap_size));
-    RETURN_ON_NULL(decoder_kv_session);
-  }
+  RETURN_ON_ERROR(ort_session_from_path(
+      ort_api, ort_env, ort_session_options, decoder_kv_path.c_str(),
+      &decoder_kv_session, &decoder_kv_mmapped_data,
+      &decoder_kv_mmapped_data_size));
+  RETURN_ON_NULL(decoder_kv_session);
 
   // Load tokenizer
   tokenizer =
       new BinTokenizer(tokenizer_path, kSpaceString, kTokenizerEncoding);
   RETURN_ON_NULL(tokenizer);
 
+  return 0;
+}
+
+int MoonshineStreamingModel::replace_decoder_kv_from_path(const char *path) {
+  if (decoder_kv_session != nullptr) {
+    ort_api->ReleaseSession(decoder_kv_session);
+    decoder_kv_session = nullptr;
+  }
+#ifndef _WIN32
+  unmap_model(&decoder_kv_mmapped_data, &decoder_kv_mmapped_data_size);
+#endif
+  RETURN_ON_ERROR(ort_session_from_path(
+      ort_api, ort_env, ort_session_options, path, &decoder_kv_session,
+      &decoder_kv_mmapped_data, &decoder_kv_mmapped_data_size));
+  RETURN_ON_NULL(decoder_kv_session);
   return 0;
 }
 
@@ -304,13 +468,18 @@ int MoonshineStreamingModel::load_from_memory(
     const uint8_t *cross_kv_model_data, size_t cross_kv_model_data_size,
     const uint8_t *decoder_kv_model_data, size_t decoder_kv_model_data_size,
     const uint8_t *tokenizer_data, size_t tokenizer_data_size,
-    const MoonshineStreamingConfig &in_config, int32_t /* model_type */) {
+    const MoonshineStreamingConfig &in_config, int32_t /* model_type */,
+    const uint8_t *frontend_weights_data, size_t frontend_weights_data_size) {
   config = in_config;
 
   RETURN_ON_ERROR(ort_session_from_memory(
       ort_api, ort_env, ort_session_options, frontend_model_data,
       frontend_model_data_size, &frontend_session));
   RETURN_ON_NULL(frontend_session);
+  if (frontend_weights_data != nullptr && frontend_weights_data_size > 0) {
+    RETURN_ON_ERROR(load_frontend_split_weights_from_memory(
+        frontend_weights_data, frontend_weights_data_size));
+  }
 
   RETURN_ON_ERROR(ort_session_from_memory(
       ort_api, ort_env, ort_session_options, encoder_model_data,
@@ -350,6 +519,10 @@ int MoonshineStreamingModel::load_from_assets(const char *model_dir,
   }
 
   // Build paths
+  std::string frontend_model_path =
+      append_path_component(model_dir, "frontend.model.ort");
+  std::string frontend_weights_path =
+      append_path_component(model_dir, "frontend.weights.ort");
   std::string frontend_path = append_path_component(model_dir, "frontend.ort");
   std::string encoder_path = append_path_component(model_dir, "encoder.ort");
   std::string adapter_path = append_path_component(model_dir, "adapter.ort");
@@ -372,12 +545,43 @@ int MoonshineStreamingModel::load_from_assets(const char *model_dir,
   AAsset_close(config_asset);
   RETURN_ON_ERROR(load_config_from_string(config_json));
 
-  // Load sessions
-  RETURN_ON_ERROR(ort_session_from_asset(
-      ort_api, ort_env, ort_session_options, assetManager,
-      frontend_path.c_str(), &frontend_session, &frontend_mmapped_data,
-      &frontend_mmapped_data_size));
-  RETURN_ON_NULL(frontend_session);
+  AAsset *split_model_asset = AAssetManager_open(
+      assetManager, frontend_model_path.c_str(), AASSET_MODE_BUFFER);
+  AAsset *split_weights_asset = AAssetManager_open(
+      assetManager, frontend_weights_path.c_str(), AASSET_MODE_BUFFER);
+  const bool split_frontend =
+      split_model_asset != nullptr && split_weights_asset != nullptr;
+  if (split_model_asset != nullptr) {
+    AAsset_close(split_model_asset);
+  }
+  if (split_weights_asset != nullptr) {
+    AAsset_close(split_weights_asset);
+  }
+
+  if (split_frontend) {
+    RETURN_ON_ERROR(ort_session_from_asset(
+        ort_api, ort_env, ort_session_options, assetManager,
+        frontend_model_path.c_str(), &frontend_session, &frontend_mmapped_data,
+        &frontend_mmapped_data_size));
+    RETURN_ON_NULL(frontend_session);
+    OrtSession *weights_session = nullptr;
+    const char *weights_mapped = nullptr;
+    size_t weights_mapped_size = 0;
+    RETURN_ON_ERROR(ort_session_from_asset(
+        ort_api, ort_env, ort_session_options, assetManager,
+        frontend_weights_path.c_str(), &weights_session, &weights_mapped,
+        &weights_mapped_size));
+    const int weights_err = collect_frontend_split_weights(weights_session);
+    ort_api->ReleaseSession(weights_session);
+    unmap_model(&weights_mapped, &weights_mapped_size);
+    RETURN_ON_ERROR(weights_err);
+  } else {
+    RETURN_ON_ERROR(ort_session_from_asset(
+        ort_api, ort_env, ort_session_options, assetManager,
+        frontend_path.c_str(), &frontend_session, &frontend_mmapped_data,
+        &frontend_mmapped_data_size));
+    RETURN_ON_NULL(frontend_session);
+  }
 
   RETURN_ON_ERROR(ort_session_from_asset(
       ort_api, ort_env, ort_session_options, assetManager, encoder_path.c_str(),
@@ -390,20 +594,16 @@ int MoonshineStreamingModel::load_from_assets(const char *model_dir,
   RETURN_ON_NULL(adapter_session);
 
   // Load cross_kv and decoder_kv sessions (required for decoding)
-  const char *cross_kv_mmap = nullptr;
-  size_t cross_kv_mmap_size = 0;
-  RETURN_ON_ERROR(ort_session_from_asset(ort_api, ort_env, ort_session_options,
-                                         assetManager, cross_kv_path.c_str(),
-                                         &cross_kv_session, &cross_kv_mmap,
-                                         &cross_kv_mmap_size));
+  RETURN_ON_ERROR(ort_session_from_asset(
+      ort_api, ort_env, ort_session_options, assetManager,
+      cross_kv_path.c_str(), &cross_kv_session, &cross_kv_mmapped_data,
+      &cross_kv_mmapped_data_size));
   RETURN_ON_NULL(cross_kv_session);
 
-  const char *decoder_kv_mmap = nullptr;
-  size_t decoder_kv_mmap_size = 0;
-  RETURN_ON_ERROR(ort_session_from_asset(ort_api, ort_env, ort_session_options,
-                                         assetManager, decoder_kv_path.c_str(),
-                                         &decoder_kv_session, &decoder_kv_mmap,
-                                         &decoder_kv_mmap_size));
+  RETURN_ON_ERROR(ort_session_from_asset(
+      ort_api, ort_env, ort_session_options, assetManager,
+      decoder_kv_path.c_str(), &decoder_kv_session, &decoder_kv_mmapped_data,
+      &decoder_kv_mmapped_data_size));
   RETURN_ON_NULL(decoder_kv_session);
 
   tokenizer = new BinTokenizer(tokenizer_path, assetManager, kSpaceString,
@@ -534,24 +734,38 @@ int MoonshineStreamingModel::process_audio_chunk(MoonshineStreamingState *state,
                    frame_count_shape.data(), frame_count_shape.size(),
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &frame_count_tensor));
 
-  // Run frontend
-  const char *input_names[] = {"audio_chunk",  "sample_buffer", "sample_len",
-                               "conv1_buffer", "conv2_buffer",  "frame_count"};
+  // Run frontend. Split-pair weights are extra graph inputs, so the name
+  // list is not a fixed 6-entry array.
+  std::vector<const char *> input_names = {"audio_chunk",  "sample_buffer",
+                                           "sample_len",   "conv1_buffer",
+                                           "conv2_buffer", "frame_count"};
   const char *output_names[] = {"features",         "sample_buffer_out",
                                 "sample_len_out",   "conv1_buffer_out",
                                 "conv2_buffer_out", "frame_count_out"};
 
-  OrtValue *inputs[] = {audio_tensor,        sample_buffer_tensor,
-                        sample_len_tensor,   conv1_buffer_tensor,
-                        conv2_buffer_tensor, frame_count_tensor};
+  std::vector<OrtValue *> inputs = {audio_tensor,        sample_buffer_tensor,
+                                    sample_len_tensor,   conv1_buffer_tensor,
+                                    conv2_buffer_tensor, frame_count_tensor};
+  for (FrontendSplitWeight &weight : frontend_split_weights) {
+    OrtValue *weight_tensor = nullptr;
+    RETURN_ON_ORT_ERROR(
+        ort_api, ort_api->CreateTensorWithDataAsOrtValue(
+                     ort_memory_info, weight.data.data(),
+                     weight.data.size() * sizeof(float), weight.shape.data(),
+                     weight.shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                     &weight_tensor));
+    inputs.push_back(weight_tensor);
+    input_names.push_back(weight.name.c_str());
+  }
   OrtValue *outputs[6] = {nullptr};
 
-  OrtStatus *status = ORT_RUN(ort_api, frontend_session, input_names, inputs, 6,
-                              output_names, 6, outputs);
+  OrtStatus *status =
+      ORT_RUN(ort_api, frontend_session, input_names.data(), inputs.data(),
+              inputs.size(), output_names, 6, outputs);
 
   // Release input tensors
-  for (int i = 0; i < 6; i++) {
-    ort_api->ReleaseValue(inputs[i]);
+  for (OrtValue *value : inputs) {
+    ort_api->ReleaseValue(value);
   }
 
   if (status != nullptr) {
@@ -801,7 +1015,6 @@ int MoonshineStreamingModel::compute_cross_kv(MoonshineStreamingState *state) {
     return 1;
   }
   if (state->memory_len == 0) {
-    LOG("Memory is empty, cannot compute cross K/V\n");
     return 1;
   }
 
@@ -1117,8 +1330,8 @@ int MoonshineStreamingModel::decode_step(MoonshineStreamingState *state,
     return 1;
   }
   if (state->memory_len == 0) {
-    LOG("Memory is empty\n");
-    return 1;
+    write_empty_decode_logits(config, logits_out);
+    return 0;
   }
 
   std::lock_guard<std::mutex> lock(processing_mutex);
@@ -1169,8 +1382,10 @@ int MoonshineStreamingModel::decode_tokens(MoonshineStreamingState *state,
     return 1;
   }
   if (state->memory_len == 0) {
-    LOG("Memory is empty\n");
-    return 1;
+    for (int i = 0; i < tokens_len; ++i) {
+      write_empty_decode_logits(config, logits_out + i * config.vocab_size);
+    }
+    return 0;
   }
 
   std::lock_guard<std::mutex> lock(processing_mutex);
@@ -1223,7 +1438,6 @@ int MoonshineStreamingModel::decode_full(MoonshineStreamingState *state,
     return 1;
   }
   if (state->memory_len == 0) {
-    LOG("Memory is empty\n");
     *tokens_out = nullptr;
     *tokens_len_out = 0;
     return 0;

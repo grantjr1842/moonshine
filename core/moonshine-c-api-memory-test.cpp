@@ -176,11 +176,17 @@ TEST_CASE(
   const fs::path voices_dir = g_data_root / "kokoro" / "voices";
   REQUIRE(std::filesystem::is_directory(voices_dir));
 
-  const auto model_key_it = std::find_if(
-      bundle.begin(), bundle.end(),
-      [](const auto& pr) { return pr.first == "kokoro/model.ort"; });
-  REQUIRE(model_key_it != bundle.end());
-  REQUIRE_FALSE(model_key_it->second.empty());
+  // Kokoro ships as two stages, each a split ORT pair, and all four files have
+  // to reach the library as buffers for this to be a real in-memory load.
+  for (const char* key :
+       {"kokoro/prosody.model.ort", "kokoro/prosody.weights.ort",
+        "kokoro/decoder.model.ort", "kokoro/decoder.weights.ort"}) {
+    const auto it =
+        std::find_if(bundle.begin(), bundle.end(),
+                     [key](const auto& pr) { return pr.first == key; });
+    REQUIRE_MESSAGE(it != bundle.end(), "missing from bundle: " << key);
+    REQUIRE_FALSE(it->second.empty());
+  }
 
   std::vector<std::string> voice_stems;
   for (const auto& ent : std::filesystem::directory_iterator(voices_dir)) {
@@ -209,7 +215,8 @@ TEST_CASE(
     const char* lang = kokoro_lang_for_voice_stem(voice);
     REQUIRE(lang != nullptr);
     // Match moonshine-c-api-test: optional ONNX G2P bundles may be absent on a
-    // partial CDN tree; skip those languages rather than fail create_from_memory.
+    // partial CDN tree; skip those languages rather than fail
+    // create_from_memory.
     if (std::strcmp(lang, "zh_hans") == 0 && !chinese_onnx_ready) {
       MESSAGE("skip Chinese Kokoro voice (ONNX G2P bundle missing): ", voice);
       continue;

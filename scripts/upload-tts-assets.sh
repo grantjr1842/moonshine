@@ -26,6 +26,9 @@
 #   MOONSHINE_TTS_CACHE_CONTROL Cache-Control applied to uploaded objects
 #                              (default: "public, max-age=2592000"; 30 days).
 #   MOONSHINE_INVALIDATE_CDN   When non-empty, purge the objects this run replaced.
+#   MOONSHINE_CDN_ALLOW_OVERWRITE  Permit replacing keys that already exist. Off by
+#                              default: existing URLs are immutable so that older
+#                              clients keep getting the bytes they shipped against.
 #   MOONSHINE_RCLONE_EXTRA     Extra flags passed to rclone (e.g. "--dry-run", or
 #                              "--delete-excluded" if you really mean to remove things).
 #
@@ -41,11 +44,11 @@ SRC="${ROOT}/core/moonshine-tts/data"
 EXTRA="${MOONSHINE_RCLONE_EXTRA:-}"
 CACHE_CONTROL="${MOONSHINE_TTS_CACHE_CONTROL:-public, max-age=2592000}"
 
-if [[ ! -f "${SRC}/kokoro/model.ort" ]]; then
+if [[ ! -f "${SRC}/kokoro/prosody.model.ort" ]]; then
   echo "TTS binaries missing under ${SRC}; fetching via scripts/fetch-voice-assets.sh..." >&2
   "${ROOT}/scripts/fetch-voice-assets.sh" tts
 fi
-if [[ ! -d "${SRC}" || ! -f "${SRC}/kokoro/model.ort" ]]; then
+if [[ ! -d "${SRC}" || ! -f "${SRC}/kokoro/prosody.model.ort" ]]; then
   echo "Source directory not ready: ${SRC}" >&2
   echo "Run: scripts/fetch-voice-assets.sh tts" >&2
   exit 1
@@ -58,17 +61,51 @@ DEST="r2:${CDN_R2_BUCKET}/tts"
 LOG=$(mktemp)
 trap 'rm -f "${LOG}"' EXIT
 
+# Under --dry-run rclone logs "Skipped copy ..." rather than "Copied", so the parser below
+# has to look for a different message and the purge has to be suppressed. Without this a
+# dry run reports that nothing needs uploading no matter how much does.
+DRY_RUN=""
+for flag in ${EXTRA}; do
+  [[ "${flag}" == "--dry-run" || "${flag}" == "-n" ]] && DRY_RUN=1
+done
+
+# TTS keys are path-based and undated, so replacing one changes what every
+# already-released client downloads from a URL it has hardcoded. --immutable
+# makes that an error: brand-new keys upload, byte-identical keys are skipped so
+# re-runs stay cheap, and a changed body stops the run. Publish a changed voice
+# under a new key instead. MOONSHINE_CDN_ALLOW_OVERWRITE=1 restores the old
+# replace-in-place behaviour for retracting a bad asset, which is also the only
+# case where the purge below genuinely matters.
+IMMUTABLE="--immutable"
+if [[ -n "${MOONSHINE_CDN_ALLOW_OVERWRITE:-}" ]]; then
+  IMMUTABLE=""
+  echo "WARNING replacing existing TTS keys in place; released clients pinned to" >&2
+  echo "these paths will receive the new bytes. Set MOONSHINE_INVALIDATE_CDN too." >&2
+fi
+
 echo "Copy ${SRC} -> ${DEST} (Cache-Control: ${CACHE_CONTROL})" >&2
 # --checksum compares hashes rather than mtime/size, matching what gsutil rsync -c did.
 # --header-upload is how the caching header reaches R2; without it objects are served with
 # no Cache-Control at all. The JSON log is parsed below to find what actually changed.
 # shellcheck disable=SC2086
-rclone copy "${SRC}" "${DEST}" --checksum \
+if ! rclone copy "${SRC}" "${DEST}" --checksum ${IMMUTABLE} \
   --header-upload "Cache-Control: ${CACHE_CONTROL}" \
-  --use-json-log --log-level INFO --log-file "${LOG}" ${EXTRA}
+  --use-json-log --log-level INFO --log-file "${LOG}" ${EXTRA}; then
+  if [[ -n "${IMMUTABLE}" ]]; then
+    echo >&2
+    echo "Upload stopped: a key already on the CDN has different content locally." >&2
+    echo "Existing TTS URLs are immutable because released clients hardcode them." >&2
+    echo "Give the changed asset a new key, or set MOONSHINE_CDN_ALLOW_OVERWRITE=1" >&2
+    echo "with MOONSHINE_INVALIDATE_CDN=1 to deliberately retract the old bytes." >&2
+  fi
+  exit 1
+fi
 
-TRANSFERRED=$(python3 - "${LOG}" <<'PY'
+TRANSFERRED=$(python3 - "${LOG}" "${DRY_RUN}" <<'PY'
 import json, sys
+# rclone logs "Copied (new)", "Copied (replaced existing)", "Updated" and similar, but
+# "Skipped copy as --dry-run is set" when it is only reporting what it would do.
+wanted = ("Skipped copy",) if sys.argv[2] else ("Copied", "Updated")
 objects = []
 for line in open(sys.argv[1], errors="replace"):
     line = line.strip()
@@ -78,20 +115,27 @@ for line in open(sys.argv[1], errors="replace"):
         entry = json.loads(line)
     except ValueError:
         continue
-    # rclone logs "Copied (new)", "Copied (replaced existing)", "Updated" and similar.
-    if entry.get("object") and entry.get("msg", "").startswith(("Copied", "Updated")):
+    if entry.get("object") and entry.get("msg", "").startswith(wanted):
         objects.append(entry["object"])
 print("\n".join(sorted(set(objects))))
 PY
 )
 
 if [[ -n "${TRANSFERRED}" ]]; then
-  echo "Uploaded $(printf '%s\n' "${TRANSFERRED}" | grep -c .) object(s)." >&2
+  COUNT=$(printf '%s\n' "${TRANSFERRED}" | grep -c .)
+  if [[ -n "${DRY_RUN}" ]]; then
+    echo "Would upload ${COUNT} object(s):" >&2
+    while IFS= read -r object; do
+      [[ -n "${object}" ]] && echo "  ${object}" >&2
+    done <<<"${TRANSFERRED}"
+  else
+    echo "Uploaded ${COUNT} object(s)." >&2
+  fi
 else
   echo "Nothing changed; every object already matched." >&2
 fi
 
-if [[ -n "${MOONSHINE_INVALIDATE_CDN:-}" && -n "${TRANSFERRED}" ]]; then
+if [[ -n "${MOONSHINE_INVALIDATE_CDN:-}" && -n "${TRANSFERRED}" && -z "${DRY_RUN}" ]]; then
   echo "Purging the Cloudflare cache for the objects this run replaced..." >&2
   urls=()
   while IFS= read -r object; do

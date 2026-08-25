@@ -7,6 +7,8 @@ declare a size per file) and the file-counted fallback (TTS and G2P dependency
 lists are bare keys), and that the plumbing underneath actually reports bytes.
 """
 
+import pytest
+
 import moonshine_voice.download as download
 import moonshine_voice.download_file as download_file_mod
 from moonshine_voice.download import _ProgressTracker, _download_manifest_group
@@ -284,6 +286,24 @@ def test_download_file_stays_quiet_for_a_cached_file(monkeypatch, tmp_path):
     assert requests.calls == 0
 
 
+def test_cached_download_does_not_import_requests(tmp_path):
+    """A present file must not pull in urllib3 just to notice it is cached."""
+    dest = tmp_path / "a.bin"
+    dest.write_bytes(b"x" * 100)
+    before_requests = download_file_mod.requests
+    before_lock = download_file_mod.FileLock
+
+    download_file_mod.download_file(
+        "https://example.test/a.bin",
+        dest,
+        expected_size=100,
+        show_progress=False,
+    )
+
+    assert download_file_mod.requests is before_requests
+    assert download_file_mod.FileLock is before_lock
+
+
 def test_cached_files_still_reach_full_progress(monkeypatch, tmp_path):
     """The everything-already-downloaded case still has to end at 1."""
     monkeypatch.setattr(
@@ -295,3 +315,15 @@ def test_cached_files_still_reach_full_progress(monkeypatch, tmp_path):
     _download_manifest_group(group, tmp_path, _ProgressTracker.for_groups(callback, [group]))
 
     _assert_well_formed(calls)
+
+
+@pytest.mark.parametrize("variant", ("fp32", "fp16", "q4f16"))
+def test_removed_embedding_variants_are_no_longer_supported(variant):
+    from moonshine_voice import EmbeddingModel
+    from moonshine_voice.errors import MoonshineError
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        download.get_embedding_model(variant=variant)
+
+    with pytest.raises(MoonshineError, match="no longer supported"):
+        EmbeddingModel("/unused", model_variant=variant)
