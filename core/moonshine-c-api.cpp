@@ -1814,3 +1814,111 @@ int32_t moonshine_text_to_phonemes(int32_t grapheme_to_phonemizer_handle,
   }
   return MOONSHINE_ERROR_NONE;
 }
+// === Stubs for C API extensions hand-ported from the fork's missing
+// integration branch (7429e16...). Satisfies the linker so the Rust
+// moonshine-server / voice crates can build. Full behavior should be
+// filled in by the actual moonshine-tts / transcriber state machines
+// when this lands upstream.
+
+extern "C" void moonshine_free_buffer(void *buffer) {
+  if (buffer != nullptr) {
+    std::free(buffer);
+  }
+}
+
+extern "C" int32_t moonshine_get_stt_catalog(char **out_catalog_json) {
+  if (out_catalog_json == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  static const char kCatalog[] =
+      "[{\"language\":\"en\",\"name\":\"tiny-en\","
+      "\"arch\":\"tiny\",\"path\":\"tiny-en\","
+      "\"streaming\":false,\"sha\":\"\"},"
+      "{\"language\":\"en\",\"name\":\"tiny-streaming-en\","
+      "\"arch\":\"tiny_streaming\",\"path\":\"tiny-streaming-en\","
+      "\"streaming\":true,\"sha\":\"\"}]";
+  const size_t len = std::strlen(kCatalog);
+  char *buf = static_cast<char *>(std::malloc(len + 1));
+  if (buf == nullptr) {
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  std::memcpy(buf, kCatalog, len);
+  buf[len] = '\0';
+  *out_catalog_json = buf;
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_tts_supports_streaming(int32_t handle) {
+  (void)handle;
+  return 0;  // Streaming TTS not bound; callers downgrade to non-streaming path.
+}
+
+extern "C" int32_t moonshine_text_to_speech_stream(
+    int32_t handle, const char *text,
+    const struct moonshine_option_t *options, uint64_t options_count,
+    moonshine_tts_stream_callback on_chunk, void *user_data,
+    int32_t *out_sample_rate_hz) {
+  (void)handle;
+  (void)text;
+  (void)options;
+  (void)options_count;
+  (void)on_chunk;
+  (void)user_data;
+  if (out_sample_rate_hz != nullptr) {
+    *out_sample_rate_hz = 0;
+  }
+  return MOONSHINE_ERROR_UNKNOWN;
+}
+
+extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
+                                                   int32_t stream_handle,
+                                                   int32_t *out_state,
+                                                   int64_t *out_timestamp_ms) {
+  (void)transcriber_handle;
+  (void)stream_handle;
+  if (out_state != nullptr) {
+    *out_state = 0;
+  }
+  if (out_timestamp_ms != nullptr) {
+    *out_timestamp_ms = 0;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_session_get_diarization_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    uint8_t out_speaker_id[8], int64_t *out_finalized_at_ms) {
+  (void)transcriber_handle;
+  (void)stream_handle;
+  if (out_state != nullptr) {
+    *out_state = 0;
+  }
+  if (out_speaker_id != nullptr) {
+    std::memset(out_speaker_id, 0, 8);
+  }
+  if (out_finalized_at_ms != nullptr) {
+    *out_finalized_at_ms = 0;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_get_stt_dependencies(
+    const char *language, const struct moonshine_option_t *options,
+    uint64_t options_count, char **out_dependencies_json) {
+  (void)language;
+  (void)options;
+  (void)options_count;
+  if (out_dependencies_json == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  static const char kDeps[] = "[]";
+  const size_t len = std::strlen(kDeps);
+  char *buf = static_cast<char *>(std::malloc(len + 1));
+  if (buf == nullptr) {
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  std::memcpy(buf, kDeps, len);
+  buf[len] = '\0';
+  *out_dependencies_json = buf;
+  return MOONSHINE_ERROR_NONE;
+}

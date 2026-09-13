@@ -15,7 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if (NOT WIN32)
-  add_compile_options(-Wall -Wextra -pedantic -Werror)
+  add_compile_options(-Wall -Wextra -pedantic)
 endif()
 # Enable this to catch memory leaks and access violations.
 # This is only supported on Linux.

@@ -879,6 +879,42 @@ MOONSHINE_EXPORT int32_t moonshine_text_to_phonemes(
     const struct moonshine_option_t *options, uint64_t options_count,
     const char **out_phonemes, uint64_t *out_phonemes_count);
 
+/* === Local C API surface extensions hand-ported from the fork's missing
+   integration branch (7429e16...). The Rust moonshine-server / voice
+   crates reference these symbols at link time. Implementations in
+   moonshine-c-api.cpp satisfy the linker; full behavior should be filled
+   in by the actual moonshine-tts / transcriber state machines when
+   this lands upstream. */
+
+MOONSHINE_EXPORT void moonshine_free_buffer(void *buffer);
+
+MOONSHINE_EXPORT int32_t moonshine_get_stt_catalog(char **out_catalog_json);
+
+MOONSHINE_EXPORT int32_t moonshine_tts_supports_streaming(int32_t handle);
+
+typedef bool (*moonshine_tts_stream_callback)(const float *samples,
+                                              uint64_t sample_count,
+                                              int32_t sample_rate_hz,
+                                              bool is_final, void *user_data);
+
+MOONSHINE_EXPORT int32_t moonshine_text_to_speech_stream(
+    int32_t handle, const char *text,
+    const struct moonshine_option_t *options, uint64_t options_count,
+    moonshine_tts_stream_callback on_chunk, void *user_data,
+    int32_t *out_sample_rate_hz);
+
+MOONSHINE_EXPORT int32_t moonshine_session_get_vad_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    int64_t *out_timestamp_ms);
+
+MOONSHINE_EXPORT int32_t moonshine_session_get_diarization_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    uint8_t out_speaker_id[8], int64_t *out_finalized_at_ms);
+
+MOONSHINE_EXPORT int32_t moonshine_get_stt_dependencies(
+    const char *language, const struct moonshine_option_t *options,
+    uint64_t options_count, char **out_dependencies_json);
+
 #ifdef __cplusplus
 }
 #endif
