@@ -50,3 +50,19 @@ text-to-speech
 transcriber
 build-*/
 /eval-results.txt
+
+# Test asset binaries fetched by scripts/fetch-voice-assets.sh (CDN or HF).
+# Licensing READMEs under core/moonshine-tts/data/ stay tracked in git.
+/core/moonshine-tts/data/**
+!/core/moonshine-tts/data/**/
+!/core/moonshine-tts/data/**/*.md
+/test-assets/**/*.ort
+/test-assets/tiny-en/tokenizer.bin
+/test-assets/tiny-streaming-*/tokenizer.bin
+/test-assets/tiny-streaming-*/streaming_config.json
+/language-bindings/android/java/androidTest/assets/tiny-en/*.ort
+/language-bindings/android/java/androidTest/assets/tiny-en/tokenizer.bin
+/language-bindings/python/src/moonshine_voice/assets/tiny-en/*.ort
+/examples/**/tts-data/
+/lora_work/
+/lora_runs/
