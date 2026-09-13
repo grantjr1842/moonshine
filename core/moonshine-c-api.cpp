@@ -158,6 +158,13 @@ void parse_transcriber_options(const OptionVector &options,
       // already supports this option name; we just acknowledge it here.
       // (No-op on the C++ side for now; behavior defaults to "decode
       // incomplete lines" per the upstream moonshine-tts policy.)
+    } else if (option_name == "diarization_model_dir") {
+      // Added by moonshine-rs: path to the pyannote-style diarization
+      // model directory. The fork's moonshine-c-api accepts this option
+      // name but does not yet use it (the diarization pipeline is a
+      // stub). We just record it so the server's startup doesn't bail
+      // out — actual speaker-id computation would happen here.
+      (void)option_value;
     } else {
       throw std::runtime_error("Unknown transcriber option: '" + option_name +
                                "', value=" + option_value);
