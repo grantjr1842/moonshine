@@ -1830,13 +1830,31 @@ extern "C" int32_t moonshine_get_stt_catalog(char **out_catalog_json) {
   if (out_catalog_json == nullptr) {
     return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
+  // NativeSttCatalog = { languages: [ { code, english_name, models: [
+  // { model_arch, download_url } ] } ] }
   static const char kCatalog[] =
-      "[{\"language\":\"en\",\"name\":\"tiny-en\","
-      "\"arch\":\"tiny\",\"path\":\"tiny-en\","
-      "\"streaming\":false,\"sha\":\"\"},"
-      "{\"language\":\"en\",\"name\":\"tiny-streaming-en\","
-      "\"arch\":\"tiny_streaming\",\"path\":\"tiny-streaming-en\","
-      "\"streaming\":true,\"sha\":\"\"}]";
+      "{\"languages\":["
+      "{\"code\":\"en\",\"english_name\":\"English\","
+      "\"models\":["
+      "{\"model_arch\":0,\"download_url\":\"\"},"
+      "{\"model_arch\":2,\"download_url\":\"\"},"
+      "{\"model_arch\":4,\"download_url\":\"\"}"
+      "]},"
+      "{\"code\":\"ja\",\"english_name\":\"Japanese\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]},"
+      "{\"code\":\"zh\",\"english_name\":\"Chinese\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]},"
+      "{\"code\":\"ko\",\"english_name\":\"Korean\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]},"
+      "{\"code\":\"ar\",\"english_name\":\"Arabic\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]},"
+      "{\"code\":\"de\",\"english_name\":\"German\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]},"
+      "{\"code\":\"es\",\"english_name\":\"Spanish\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]},"
+      "{\"code\":\"vi\",\"english_name\":\"Vietnamese\","
+      "\"models\":[{\"model_arch\":2,\"download_url\":\"\"}]}"
+      "]}";
   const size_t len = std::strlen(kCatalog);
   char *buf = static_cast<char *>(std::malloc(len + 1));
   if (buf == nullptr) {
@@ -1911,7 +1929,10 @@ extern "C" int32_t moonshine_get_stt_dependencies(
   if (out_dependencies_json == nullptr) {
     return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
-  static const char kDeps[] = "[]";
+  static const char kDeps[] =
+      "{\"groups\":[{\"files\":["
+      "{\"name\":\"model.ort\",\"url\":\"\",\"size\":0,\"checksum\":\"\"}"
+      "]}]}";
   const size_t len = std::strlen(kDeps);
   char *buf = static_cast<char *>(std::malloc(len + 1));
   if (buf == nullptr) {
