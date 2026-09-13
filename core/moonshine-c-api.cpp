@@ -151,6 +151,13 @@ void parse_transcriber_options(const OptionVector &options,
       out_options.ort_provider_names = ort_parse_provider_names(option_value);
     } else if (option_name == "coreml_cache_dir") {
       out_options.coreml_cache_dir = option_value;
+    } else if (option_name == "decode_incomplete_lines") {
+      // Added by moonshine-rs: when true, the streaming transcriber
+      // emits partial lines for in-progress audio (matching Rust
+      // `final_only == false`). The fork's moonshine-streaming-model
+      // already supports this option name; we just acknowledge it here.
+      // (No-op on the C++ side for now; behavior defaults to "decode
+      // incomplete lines" per the upstream moonshine-tts policy.)
     } else {
       throw std::runtime_error("Unknown transcriber option: '" + option_name +
                                "', value=" + option_value);
