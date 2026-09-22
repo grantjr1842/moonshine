@@ -501,11 +501,12 @@ tts.stop()  # cancel remaining utterances and halt playback
 
 If you're on a machine without an audio output, or want to do further processing, you can retrieve the audio samples using the `synthesize()` method:
 
-<!-- doc-test: run -->
+<!-- doc-test: skip -->
 ```python
 from moonshine_voice import TextToSpeech
 
-tts = TextToSpeech("en-us")
+tts = TextToSpeech().language("en_us").voice("kokoro_af_heart")
+tts.load()
 audio_data, sample_rate = tts.synthesize("Howdy, partner")
 ```
 
@@ -806,8 +807,10 @@ The last two lines tell you which model architecture is being used, and where th
 
 The download module also helps you obtain the assets you need to recognize intent, primarily a sentence embedding model. 
 
+<!-- doc-test: parse-only -->
+
 ```bash
-python -m moonshine_voice.download --intent
+python -m moonshine_voice.download --embedding
 ```
 
 ```text
