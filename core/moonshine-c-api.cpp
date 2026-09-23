@@ -1896,12 +1896,15 @@ extern "C" int32_t moonshine_text_to_speech_stream(
     const struct moonshine_option_t *options, uint64_t options_count,
     moonshine_tts_stream_callback on_chunk, void *user_data,
     int32_t *out_sample_rate_hz) {
-  // T-3.4: minimum-viable streaming — delegates to the one-shot
-  // `moonshine_text_to_speech` and emits the resulting audio as a
-  // single final chunk via `on_chunk`. The chunk callback is invoked
-  // once with `is_final = true`; per-phoneme chunked streaming is a
-  // follow-up that requires the underlying engine to expose a
-  // chunked API.
+  // T-3.4: chunked streaming — synthesize the whole utterance
+  // via `moonshine_text_to_speech`, then emit the resulting audio
+  // as a sequence of chunks (~0.5 s each at the synthesised sample
+  // rate). All chunks except the last have `is_final = false`;
+  // the last carries `is_final = true`. This matches the Piper /
+  // ZipVoice contract specified by the upstream `b4d1f300` patch
+  // for those engines (single synthesis, multiple chunks at the
+  // boundary level — per-phoneme streaming would require the
+  // TTS engine to expose `MoonshineTTS::synthesize_stream`).
   if (on_chunk == nullptr) {
     return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
@@ -1917,10 +1920,24 @@ extern "C" int32_t moonshine_text_to_speech_stream(
     }
     return rc;
   }
-  // Emit the chunk. The callback returns false to abort; honor that
-  // by freeing the buffer and returning 1 (callback aborted).
-  bool keep_going = on_chunk(audio_data, audio_size, sample_rate,
-                             /*is_final=*/true, user_data);
+  // Pick a chunk size that emits a few chunks for typical
+  // utterances (~1 s of audio → ~2 chunks) and exactly one chunk
+  // for very short utterances. ~0.5 s at the output sample rate
+  // is a reasonable default for our supported engines (Piper
+  // / ZipVoice default to 22050 / 24000 Hz).
+  constexpr uint64_t kChunkSamples = 8192;
+  const uint64_t total_samples = audio_size;
+  bool keep_going = true;
+  for (uint64_t offset = 0; offset < total_samples; offset += kChunkSamples) {
+    const uint64_t end = std::min<uint64_t>(offset + kChunkSamples, total_samples);
+    const bool is_final = (end == total_samples);
+    const uint64_t chunk_len = end - offset;
+    keep_going = on_chunk(audio_data + offset, chunk_len, sample_rate,
+                          is_final, user_data);
+    if (!keep_going) {
+      break;
+    }
+  }
   free(audio_data);
   if (!keep_going) {
     if (out_sample_rate_hz != nullptr) {
