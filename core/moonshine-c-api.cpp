@@ -1882,7 +1882,13 @@ extern "C" int32_t moonshine_get_stt_catalog(char **out_catalog_json) {
 
 extern "C" int32_t moonshine_tts_supports_streaming(int32_t handle) {
   (void)handle;
-  return 0;  // Streaming TTS not bound; callers downgrade to non-streaming path.
+  // T-3.4: minimum-viable streaming — the streaming transport
+  // path is real but emits a single final chunk per call (delegates
+  // to `moonshine_text_to_speech`). Per-phoneme chunked streaming
+  // is a follow-up once the underlying engine exposes a streaming
+  // API. Callers can opt in to the streaming transport knowing
+  // they receive exactly one chunk per call.
+  return 1;
 }
 
 extern "C" int32_t moonshine_text_to_speech_stream(
@@ -1890,16 +1896,42 @@ extern "C" int32_t moonshine_text_to_speech_stream(
     const struct moonshine_option_t *options, uint64_t options_count,
     moonshine_tts_stream_callback on_chunk, void *user_data,
     int32_t *out_sample_rate_hz) {
-  (void)handle;
-  (void)text;
-  (void)options;
-  (void)options_count;
-  (void)on_chunk;
-  (void)user_data;
-  if (out_sample_rate_hz != nullptr) {
-    *out_sample_rate_hz = 0;
+  // T-3.4: minimum-viable streaming — delegates to the one-shot
+  // `moonshine_text_to_speech` and emits the resulting audio as a
+  // single final chunk via `on_chunk`. The chunk callback is invoked
+  // once with `is_final = true`; per-phoneme chunked streaming is a
+  // follow-up that requires the underlying engine to expose a
+  // chunked API.
+  if (on_chunk == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
   }
-  return MOONSHINE_ERROR_UNKNOWN;
+  float *audio_data = nullptr;
+  uint64_t audio_size = 0;
+  int32_t sample_rate = 0;
+  int32_t rc = moonshine_text_to_speech(
+      handle, text, options, options_count,
+      &audio_data, &audio_size, &sample_rate);
+  if (rc != MOONSHINE_ERROR_NONE) {
+    if (out_sample_rate_hz != nullptr) {
+      *out_sample_rate_hz = 0;
+    }
+    return rc;
+  }
+  // Emit the chunk. The callback returns false to abort; honor that
+  // by freeing the buffer and returning 1 (callback aborted).
+  bool keep_going = on_chunk(audio_data, audio_size, sample_rate,
+                             /*is_final=*/true, user_data);
+  free(audio_data);
+  if (!keep_going) {
+    if (out_sample_rate_hz != nullptr) {
+      *out_sample_rate_hz = 0;
+    }
+    return 1;  // callback aborted
+  }
+  if (out_sample_rate_hz != nullptr) {
+    *out_sample_rate_hz = sample_rate;
+  }
+  return MOONSHINE_ERROR_NONE;
 }
 
 extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
