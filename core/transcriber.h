@@ -202,6 +202,14 @@ class Transcriber {
   Transcriber(const TranscriberOptions &options = TranscriberOptions());
   ~Transcriber();
 
+  /// Look up a live stream by id, holding the lock the whole time.
+  ///
+  /// Returns nullptr if there is no such stream. Exists for the
+  /// `moonshine_session_get_vad_state` C-API entry point; returning the
+  /// pointer rather than exposing the map keeps `streams` and
+  /// `streams_mutex` private.
+  TranscriberStream *get_stream(int32_t stream_id);
+
   void transcribe_without_streaming(const float *audio_data,
                                     uint64_t audio_length, int32_t sample_rate,
                                     uint32_t flags,

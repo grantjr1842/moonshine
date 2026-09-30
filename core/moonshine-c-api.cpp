@@ -1991,17 +1991,55 @@ extern "C" int32_t moonshine_text_to_speech_stream(
   return MOONSHINE_ERROR_NONE;
 }
 
+// The voice-activity detector resamples every input to its internal 16 kHz, so
+// its sample counter is already in these units. Kept here rather than exported
+// because the C API speaks milliseconds, not samples.
+constexpr int32_t kMoonshineVadSampleRate = 16000;
+
 extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
                                                    int32_t stream_handle,
                                                    int32_t *out_state,
                                                    int64_t *out_timestamp_ms) {
-  (void)transcriber_handle;
-  (void)stream_handle;
+  // This was a stub returning constant zeros, which meant
+  // `moonshine-server --vad-events` never emitted a `vad_event` frame: the
+  // server diffs the reported state against the previous one, and a constant
+  // never changes. The state is real and has been all along — the streaming
+  // session owns a `VoiceActivityDetector`, feeds it audio in
+  // `Transcriber::transcribe_streaming`, and already calls `is_active()`
+  // internally to decide whether the stream has stopped. It only was not
+  // exposed.
+  CHECK_TRANSCRIBER_HANDLE(transcriber_handle);
+  Transcriber *transcriber = transcriber_map[transcriber_handle];
+
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    LOGF("Moonshine stream handle is invalid: handle %d", stream_handle);
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+
+  // `vad_mutex` guards the detector, because `process_audio` runs on whichever
+  // thread is feeding the stream. `is_active()` is documented `const`, but the
+  // lock is still needed for the same reason the caller takes it.
+  bool is_speaking = false;
+  size_t samples = 0;
+  {
+    std::lock_guard<std::mutex> lock(stream->vad_mutex);
+    if (stream->vad != nullptr) {
+      is_speaking = stream->vad->is_active();
+      samples = stream->vad->samples_processed();
+    }
+  }
+
+  LOGF("VADDBG transcriber=%d stream=%d speaking=%d samples=%zu", transcriber_handle,
+       stream_handle, (int)is_speaking, samples);
   if (out_state != nullptr) {
-    *out_state = 0;
+    *out_state = is_speaking ? 1 : 0;
   }
   if (out_timestamp_ms != nullptr) {
-    *out_timestamp_ms = 0;
+    // The detector resamples everything to its internal 16 kHz, so the count is
+    // already in those units.
+    *out_timestamp_ms =
+        static_cast<int64_t>(samples * 1000 / kMoonshineVadSampleRate);
   }
   return MOONSHINE_ERROR_NONE;
 }
@@ -2009,6 +2047,14 @@ extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
 extern "C" int32_t moonshine_session_get_diarization_state(
     int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
     uint8_t out_speaker_id[8], int64_t *out_finalized_at_ms) {
+  // Still a stub, and deliberately so — unlike VAD there is nothing to expose
+  // yet. There is a `diarization_model_dir` option, but `parse_transcriber_options`
+  // records it and ignores it: no diarization model is loaded and no speaker-id
+  // pipeline exists, so any non-zero state here would be fabricated. The Rust
+  // side documents this to users (USAGE.md: `--speaker-labels` events do not
+  // fire; the `[S0]` labels in transcripts come from `speaker_index` on the
+  // transcript line, which the model does produce). Implementing this needs the
+  // diarization pipeline, not a getter.
   (void)transcriber_handle;
   (void)stream_handle;
   if (out_state != nullptr) {

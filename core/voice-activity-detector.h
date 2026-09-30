@@ -51,6 +51,10 @@ class VoiceActivityDetector {
   void start();
   void stop();
   bool is_active() const { return _is_active; }
+  /// Samples fed to the detector so far, at the detector's own internal rate
+  /// (`vad_sample_rate`, 16 kHz). Used to derive `frame_timestamp_ms` for the
+  /// `moonshine_session_get_vad_state` C-API entry point.
+  size_t samples_processed() const { return samples_processed_count; }
   void process_audio(const float *audio_data, size_t audio_data_size,
                      int32_t sample_rate);
   const std::vector<VoiceActivitySegment> *get_segments() const {
