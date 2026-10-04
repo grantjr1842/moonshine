@@ -388,9 +388,12 @@ int MoonshineStreamingModel::load(const char *model_dir,
   // Load config
   RETURN_ON_ERROR(load_config(config_path.c_str()));
 
-  // Prefer the split pair so int8 weights survive ORT conversion. Fall back
-  // to a single frontend.ort for pins published before the split.
+  // Prefer the single frontend.ort when present on disk so un-re-quantized
+  // weights are used; fall back to the split frontend.model.ort +
+  // frontend.weights.ort pair when frontend.ort is absent.
+  const bool single_frontend = std::filesystem::is_regular_file(frontend_path);
   const bool split_frontend =
+      !single_frontend &&
       std::filesystem::is_regular_file(frontend_model_path) &&
       std::filesystem::is_regular_file(frontend_weights_path);
   if (split_frontend) {

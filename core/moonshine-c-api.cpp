@@ -55,6 +55,7 @@ SOFTWARE.
 #include "bin-tokenizer.h"
 #include "clone-clip.h"
 #include "debug-utils.h"
+#include "intent-recognizer.h"
 #include "moonshine-asset-catalog.h"
 #include "moonshine-g2p.h"
 #include "moonshine-model-catalog.h"
@@ -649,6 +650,282 @@ int32_t moonshine_transcribe_stream(int32_t transcriber_handle,
   }
   return MOONSHINE_ERROR_NONE;
 }
+
+/* ------------------------------ INTENT RECOGNIZER ------------------------- */
+
+namespace {
+
+std::mutex intent_recognizer_map_mutex;
+std::map<int32_t, IntentRecognizer *> intent_recognizer_map;
+int32_t next_intent_recognizer_handle = 0;
+
+int32_t allocate_intent_recognizer_handle(IntentRecognizer *recognizer) {
+  std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
+  int32_t handle = next_intent_recognizer_handle++;
+  intent_recognizer_map[handle] = recognizer;
+  return handle;
+}
+
+void free_intent_recognizer_handle(int32_t handle) {
+  // Note: Caller must hold intent_recognizer_map_mutex
+  delete intent_recognizer_map[handle];
+  intent_recognizer_map[handle] = nullptr;
+  intent_recognizer_map.erase(handle);
+}
+
+#define CHECK_INTENT_RECOGNIZER_HANDLE(handle)                         \
+  do {                                                                 \
+    if (handle < 0 || !intent_recognizer_map.contains(handle)) {       \
+      LOGF("Moonshine intent recognizer handle is invalid: handle %d", \
+           handle);                                                    \
+      return MOONSHINE_ERROR_INVALID_HANDLE;                           \
+    }                                                                  \
+  } while (0)
+
+char *duplicate_c_string(const char *s) {
+  if (s == nullptr) {
+    return nullptr;
+  }
+  std::size_t n = std::strlen(s) + 1;
+  char *out = static_cast<char *>(std::malloc(n));
+  if (out != nullptr) {
+    std::memcpy(out, s, n);
+  }
+  return out;
+}
+
+}  // namespace
+
+int32_t moonshine_create_intent_recognizer(const char *model_path,
+                                           uint32_t model_arch,
+                                           const char *model_variant) {
+  if (log_api_calls) {
+    LOGF(
+        "moonshine_create_intent_recognizer(model_path=%s, model_arch=%d, "
+        "model_variant=%s)",
+        model_path, model_arch, model_variant ? model_variant : "q4");
+  }
+
+  if (model_path == nullptr) {
+    LOGF("%s", "Invalid model_path: nullptr");
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+
+  IntentRecognizer *recognizer = nullptr;
+  try {
+    IntentRecognizerOptions options;
+    options.model_path = model_path;
+    options.model_arch = static_cast<EmbeddingModelArch>(model_arch);
+    options.model_variant = model_variant ? model_variant : "q4";
+
+    recognizer = new IntentRecognizer(options);
+  } catch (const std::exception &e) {
+    delete recognizer;
+    LOGF("Failed to create intent recognizer: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return allocate_intent_recognizer_handle(recognizer);
+}
+
+void moonshine_free_intent_recognizer(int32_t intent_recognizer_handle) {
+  if (log_api_calls) {
+    LOGF("moonshine_free_intent_recognizer(handle=%d)",
+         intent_recognizer_handle);
+  }
+  std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
+  if (intent_recognizer_map.contains(intent_recognizer_handle)) {
+    free_intent_recognizer_handle(intent_recognizer_handle);
+  }
+}
+
+int32_t moonshine_register_intent(int32_t intent_recognizer_handle,
+                                  const char *canonical_phrase,
+                                  float *embedding, uint64_t embedding_size,
+                                  int32_t priority) {
+  if (log_api_calls) {
+    LOGF(
+        "moonshine_register_intent(handle=%d, canonical_phrase=%s, "
+        "embedding=%p, embedding_size=%" PRIu64 ", priority=%d)",
+        intent_recognizer_handle, canonical_phrase,
+        static_cast<void *>(embedding), embedding_size, priority);
+  }
+  CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
+  if (canonical_phrase == nullptr) {
+    LOGF("%s", "moonshine_register_intent: canonical_phrase is nullptr");
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  try {
+    intent_recognizer_map[intent_recognizer_handle]->register_intent(
+        canonical_phrase, embedding, embedding_size, priority);
+  } catch (const std::exception &e) {
+    LOGF("Failed to register intent: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+int32_t moonshine_unregister_intent(int32_t intent_recognizer_handle,
+                                    const char *canonical_phrase) {
+  if (log_api_calls) {
+    LOGF("moonshine_unregister_intent(handle=%d, canonical_phrase=%s)",
+         intent_recognizer_handle, canonical_phrase);
+  }
+  CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
+  if (canonical_phrase == nullptr) {
+    LOGF("%s", "moonshine_unregister_intent: canonical_phrase is nullptr");
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  try {
+    bool result =
+        intent_recognizer_map[intent_recognizer_handle]->unregister_intent(
+            canonical_phrase);
+    if (!result) {
+      return MOONSHINE_ERROR_INVALID_ARGUMENT;
+    }
+  } catch (const std::exception &e) {
+    LOGF("Failed to unregister intent: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+int32_t moonshine_get_closest_intents(int32_t intent_recognizer_handle,
+                                      const char *utterance,
+                                      float tolerance_threshold,
+                                      moonshine_intent_match_t **out_matches,
+                                      uint64_t *out_count) {
+  if (log_api_calls) {
+    LOGF("moonshine_get_closest_intents(handle=%d, utterance=%s, tolerance=%f)",
+         intent_recognizer_handle, utterance ? utterance : "(null)",
+         tolerance_threshold);
+  }
+  if (out_matches == nullptr || out_count == nullptr) {
+    LOGF("%s",
+         "moonshine_get_closest_intents: out_matches or out_count is nullptr");
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  *out_matches = nullptr;
+  *out_count = 0;
+
+  CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
+  if (utterance == nullptr) {
+    LOGF("%s", "moonshine_get_closest_intents: utterance is nullptr");
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+
+  try {
+    auto ranked = intent_recognizer_map[intent_recognizer_handle]->rank_intents(
+        utterance, tolerance_threshold,
+        static_cast<size_t>(MOONSHINE_INTENT_MAX_MATCHES));
+    if (ranked.empty()) {
+      return MOONSHINE_ERROR_NONE;
+    }
+
+    const uint64_t n = static_cast<uint64_t>(ranked.size());
+    auto *arr = static_cast<moonshine_intent_match_t *>(
+        std::malloc(n * sizeof(moonshine_intent_match_t)));
+    if (arr == nullptr) {
+      return MOONSHINE_ERROR_UNKNOWN;
+    }
+    for (uint64_t i = 0; i < n; ++i) {
+      arr[i].canonical_phrase = duplicate_c_string(ranked[i].first.c_str());
+      arr[i].similarity = ranked[i].second;
+      if (arr[i].canonical_phrase == nullptr) {
+        for (uint64_t j = 0; j < i; ++j) {
+          std::free(arr[j].canonical_phrase);
+        }
+        std::free(arr);
+        return MOONSHINE_ERROR_UNKNOWN;
+      }
+    }
+    *out_matches = arr;
+    *out_count = n;
+  } catch (const std::exception &e) {
+    LOGF("Failed to get closest intents: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+void moonshine_free_intent_matches(moonshine_intent_match_t *matches,
+                                   uint64_t count) {
+  if (matches == nullptr) {
+    return;
+  }
+  for (uint64_t i = 0; i < count; ++i) {
+    std::free(matches[i].canonical_phrase);
+  }
+  std::free(matches);
+}
+
+int32_t moonshine_get_intent_count(int32_t intent_recognizer_handle) {
+  if (log_api_calls) {
+    LOGF("moonshine_get_intent_count(handle=%d)", intent_recognizer_handle);
+  }
+  std::lock_guard<std::mutex> lock(intent_recognizer_map_mutex);
+  if (!intent_recognizer_map.contains(intent_recognizer_handle)) {
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+  return static_cast<int32_t>(
+      intent_recognizer_map[intent_recognizer_handle]->get_intent_count());
+}
+
+int32_t moonshine_clear_intents(int32_t intent_recognizer_handle) {
+  if (log_api_calls) {
+    LOGF("moonshine_clear_intents(handle=%d)", intent_recognizer_handle);
+  }
+  CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
+  try {
+    intent_recognizer_map[intent_recognizer_handle]->clear_intents();
+  } catch (const std::exception &e) {
+    LOGF("Failed to clear intents: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+int32_t moonshine_calculate_intent_embedding(int32_t intent_recognizer_handle,
+                                             const char *sentence,
+                                             float **out_embedding,
+                                             uint64_t *out_embedding_size,
+                                             const char *model_name) {
+  (void)model_name;
+  if (log_api_calls) {
+    LOGF(
+        "moonshine_calculate_intent_embedding(handle=%d, sentence=%s, "
+        "out_embedding=%p, out_embedding_size=%p, model_name=%s)",
+        intent_recognizer_handle, sentence ? sentence : "(null)",
+        static_cast<void *>(out_embedding),
+        static_cast<void *>(out_embedding_size),
+        model_name ? model_name : "(null)");
+  }
+  if (sentence == nullptr || out_embedding == nullptr ||
+      out_embedding_size == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  *out_embedding = nullptr;
+  *out_embedding_size = 0;
+  CHECK_INTENT_RECOGNIZER_HANDLE(intent_recognizer_handle);
+  try {
+    std::vector<float> emb =
+        intent_recognizer_map[intent_recognizer_handle]->calculate_embedding(
+            sentence);
+    const uint64_t n = static_cast<uint64_t>(emb.size());
+    auto *buf = static_cast<float *>(std::malloc(n * sizeof(float)));
+    if (buf == nullptr) {
+      return MOONSHINE_ERROR_UNKNOWN;
+    }
+    std::memcpy(buf, emb.data(), n * sizeof(float));
+    *out_embedding = buf;
+    *out_embedding_size = n;
+  } catch (const std::exception &e) {
+    LOGF("Failed to calculate intent embedding: %s", e.what());
+    return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+void moonshine_free_intent_embedding(float *embedding) { std::free(embedding); }
 
 /* ------------------------------ EMBEDDING MODEL --------------------------- */
 
@@ -2279,6 +2556,77 @@ int32_t moonshine_get_tts_voices(const char *languages,
   }
 }
 
+extern "C" int32_t moonshine_tts_supports_streaming(int32_t handle) {
+  (void)handle;
+  // T-3.4: minimum-viable streaming — the streaming transport
+  // path is real but emits a single final chunk per call (delegates
+  // to `moonshine_text_to_speech`). Per-phoneme chunked streaming
+  // is a follow-up once the underlying engine exposes a streaming
+  // API. Callers can opt in to the streaming transport knowing
+  // they receive exactly one chunk per call.
+  return 1;
+}
+
+extern "C" int32_t moonshine_text_to_speech_stream(
+    int32_t handle, const char *text,
+    const struct moonshine_option_t *options, uint64_t options_count,
+    moonshine_tts_stream_callback on_chunk, void *user_data,
+    int32_t *out_sample_rate_hz) {
+  // T-3.4: chunked streaming — synthesize the whole utterance
+  // via `moonshine_text_to_speech`, then emit the resulting audio
+  // as a sequence of chunks (~0.5 s each at the synthesised sample
+  // rate). All chunks except the last have `is_final = false`;
+  // the last carries `is_final = true`. This matches the Piper /
+  // ZipVoice contract specified by the upstream `b4d1f300` patch
+  // for those engines (single synthesis, multiple chunks at the
+  // boundary level — per-phoneme streaming would require the
+  // TTS engine to expose `MoonshineTTS::synthesize_stream`).
+  if (on_chunk == nullptr) {
+    return MOONSHINE_ERROR_INVALID_ARGUMENT;
+  }
+  float *audio_data = nullptr;
+  uint64_t audio_size = 0;
+  int32_t sample_rate = 0;
+  int32_t rc = moonshine_text_to_speech(
+      handle, text, options, options_count,
+      &audio_data, &audio_size, &sample_rate);
+  if (rc != MOONSHINE_ERROR_NONE) {
+    if (out_sample_rate_hz != nullptr) {
+      *out_sample_rate_hz = 0;
+    }
+    return rc;
+  }
+  // Pick a chunk size that emits a few chunks for typical
+  // utterances (~1 s of audio → ~2 chunks) and exactly one chunk
+  // for very short utterances. ~0.5 s at the output sample rate
+  // is a reasonable default for our supported engines (Piper
+  // / ZipVoice default to 22050 / 24000 Hz).
+  constexpr uint64_t kChunkSamples = 8192;
+  const uint64_t total_samples = audio_size;
+  bool keep_going = true;
+  for (uint64_t offset = 0; offset < total_samples; offset += kChunkSamples) {
+    const uint64_t end = std::min<uint64_t>(offset + kChunkSamples, total_samples);
+    const bool is_final = (end == total_samples);
+    const uint64_t chunk_len = end - offset;
+    keep_going = on_chunk(audio_data + offset, chunk_len, sample_rate,
+                          is_final, user_data);
+    if (!keep_going) {
+      break;
+    }
+  }
+  free(audio_data);
+  if (!keep_going) {
+    if (out_sample_rate_hz != nullptr) {
+      *out_sample_rate_hz = 0;
+    }
+    return 1;  // callback aborted
+  }
+  if (out_sample_rate_hz != nullptr) {
+    *out_sample_rate_hz = sample_rate;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
 /* --------------------------- STREAMING TEXT TO SPEECH -------------------- */
 
 int32_t moonshine_tts_split_utterances(const char *language, const char *text,
@@ -2959,6 +3307,84 @@ int32_t moonshine_text_to_phonemes(int32_t grapheme_to_phonemizer_handle,
   } catch (const std::exception &e) {
     LOGF("Failed to convert text to phonemes: %s", e.what());
     return MOONSHINE_ERROR_UNKNOWN;
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+// The voice-activity detector resamples every input to its internal 16 kHz, so
+// its sample counter is already in these units. Kept here rather than exported
+// because the C API speaks milliseconds, not samples.
+constexpr int32_t kMoonshineVadSampleRate = 16000;
+
+extern "C" int32_t moonshine_session_get_vad_state(int32_t transcriber_handle,
+                                                   int32_t stream_handle,
+                                                   int32_t *out_state,
+                                                   int64_t *out_timestamp_ms) {
+  // This was a stub returning constant zeros, which meant
+  // `moonshine-server --vad-events` never emitted a `vad_event` frame: the
+  // server diffs the reported state against the previous one, and a constant
+  // never changes. The state is real and has been all along — the streaming
+  // session owns a `VoiceActivityDetector`, feeds it audio in
+  // `Transcriber::transcribe_streaming`, and already calls `is_active()`
+  // internally to decide whether the stream has stopped. It only was not
+  // exposed.
+  std::shared_ptr<Transcriber> transcriber;
+  RESOLVE_TRANSCRIBER_HANDLE(transcriber_handle, transcriber);
+
+  TranscriberStream *stream = transcriber->get_stream(stream_handle);
+  if (stream == nullptr) {
+    LOGF("Moonshine stream handle is invalid: handle %d", stream_handle);
+    return MOONSHINE_ERROR_INVALID_HANDLE;
+  }
+
+  // `vad_mutex` guards the detector, because `process_audio` runs on whichever
+  // thread is feeding the stream. `is_active()` is documented `const`, but the
+  // lock is still needed for the same reason the caller takes it.
+  bool is_speaking = false;
+  size_t samples = 0;
+  {
+    std::lock_guard<std::mutex> lock(stream->vad_mutex);
+    if (stream->vad != nullptr) {
+      is_speaking = stream->vad->is_active();
+      samples = stream->vad->samples_processed();
+    }
+  }
+
+  LOGF("VADDBG transcriber=%d stream=%d speaking=%d samples=%zu", transcriber_handle,
+       stream_handle, (int)is_speaking, samples);
+  if (out_state != nullptr) {
+    *out_state = is_speaking ? 1 : 0;
+  }
+  if (out_timestamp_ms != nullptr) {
+    // The detector resamples everything to its internal 16 kHz, so the count is
+    // already in those units.
+    *out_timestamp_ms =
+        static_cast<int64_t>(samples * 1000 / kMoonshineVadSampleRate);
+  }
+  return MOONSHINE_ERROR_NONE;
+}
+
+extern "C" int32_t moonshine_session_get_diarization_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    uint8_t out_speaker_id[8], int64_t *out_finalized_at_ms) {
+  // Still a stub, and deliberately so — unlike VAD there is nothing to expose
+  // yet. There is a `diarization_model_dir` option, but `parse_transcriber_options`
+  // records it and ignores it: no diarization model is loaded and no speaker-id
+  // pipeline exists, so any non-zero state here would be fabricated. The Rust
+  // side documents this to users (USAGE.md: `--speaker-labels` events do not
+  // fire; the `[S0]` labels in transcripts come from `speaker_index` on the
+  // transcript line, which the model does produce). Implementing this needs the
+  // diarization pipeline, not a getter.
+  (void)transcriber_handle;
+  (void)stream_handle;
+  if (out_state != nullptr) {
+    *out_state = 0;
+  }
+  if (out_speaker_id != nullptr) {
+    std::memset(out_speaker_id, 0, 8);
+  }
+  if (out_finalized_at_ms != nullptr) {
+    *out_finalized_at_ms = 0;
   }
   return MOONSHINE_ERROR_NONE;
 }

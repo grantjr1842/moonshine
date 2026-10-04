@@ -526,8 +526,10 @@ void Transcriber::load_from_memory_files(uint32_t model_arch) {
     size_t decoder_kv_size = 0;
     const uint8_t *config_data = nullptr;
     size_t config_size = 0;
-    if (this->options.model_files.contains("frontend.model.ort") &&
-        this->options.model_files.contains("frontend.weights.ort")) {
+    if (this->options.model_files.contains("frontend.ort")) {
+      require_bytes("frontend.ort", &frontend_data, &frontend_size);
+    } else if (this->options.model_files.contains("frontend.model.ort") &&
+               this->options.model_files.contains("frontend.weights.ort")) {
       require_bytes("frontend.model.ort", &frontend_data, &frontend_size);
       require_bytes("frontend.weights.ort", &frontend_weights_data,
                     &frontend_weights_size);
@@ -717,6 +719,15 @@ void Transcriber::free_stream(int32_t stream_id) {
     this->speaker_diarizer->free_stream(stream->diarizer_stream_id);
   }
   delete stream;
+}
+
+TranscriberStream *Transcriber::get_stream(int32_t stream_id) {
+  std::lock_guard<std::mutex> lock(this->streams_mutex);
+  auto it = this->streams.find(stream_id);
+  if (it == this->streams.end() || it->second == nullptr) {
+    return nullptr;
+  }
+  return it->second;
 }
 
 void Transcriber::start_stream(int32_t stream_id) {

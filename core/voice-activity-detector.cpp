@@ -20,6 +20,7 @@ float seconds_from_sample_count(size_t sample_count) {
 // Intentionally leaked to avoid static destruction order issues with ONNX
 // Runtime
 SileroVad *VoiceActivityDetector::silero_vad = nullptr;
+SileroVadState VoiceActivityDetector::vad_state;
 
 VoiceActivityDetector::VoiceActivityDetector(float threshold,
                                              int32_t window_size,
@@ -49,9 +50,6 @@ VoiceActivityDetector::~VoiceActivityDetector() {}
 
 void VoiceActivityDetector::start() {
   _is_active = true;
-  // Silero is recurrent, so without this a stream opens with the model still
-  // primed by whatever the previous one heard.
-  vad_state.reset();
   samples_processed_count = 0;
   segments.clear();
   current_segment_audio_buffer.resize(0);

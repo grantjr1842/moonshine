@@ -783,6 +783,122 @@ MOONSHINE_EXPORT int32_t moonshine_transcribe_stream(
     int32_t transcriber_handle, int32_t stream_handle, uint32_t flags,
     struct transcript_t **out_transcript);
 
+/* ------------------------------ INTENT RECOGNIZER ------------------------- */
+
+/* Supported embedding model architectures for intent recognition.           */
+#define MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M (0)
+
+/* Maximum number of intent matches returned by moonshine_get_closest_intents.
+ */
+#define MOONSHINE_INTENT_MAX_MATCHES (6)
+
+/* One ranked intent match from moonshine_get_closest_intents. */
+struct moonshine_intent_match_t {
+  char *canonical_phrase;
+  float similarity;
+};
+
+/* Creates an intent recognizer from files on disk.
+
+   `model_path` should be the path to the directory containing the embedding
+   model files (ONNX model and tokenizer.bin).
+
+   `model_arch` should be one of the MOONSHINE_EMBEDDING_MODEL_ARCH_* constants.
+   Currently only MOONSHINE_EMBEDDING_MODEL_ARCH_GEMMA_300M is supported.
+
+   `model_variant` specifies which model variant to load: "fp32", "fp16", "q8",
+   "q4", or "q4f16". Pass NULL to use the default "q4" variant.
+
+   Similarity filtering is done per call in moonshine_get_closest_intents via
+   `tolerance_threshold`, not at construction time.
+
+   Returns a non-negative handle on success, or a negative error code on
+   failure. The error code can be converted to a human-readable string using
+   moonshine_error_to_string.
+*/
+MOONSHINE_EXPORT int32_t moonshine_create_intent_recognizer(
+    const char *model_path, uint32_t model_arch, const char *model_variant);
+
+/* Frees an intent recognizer and all its resources. */
+MOONSHINE_EXPORT void moonshine_free_intent_recognizer(
+    int32_t intent_recognizer_handle);
+
+/* Registers a canonical intent phrase (no callback).
+
+   `embedding` is an optional pointer to an array of floats of size
+   `embedding_size`. If `embedding` is NULL, the embedding is calculated for the
+   canonical phrase.
+   `priority` affects how intents are ranked. If a higher priority intent is
+   within the tolerance threshold, it will be ranked above lower priority
+   intents, even if their similarity is higher.
+
+   Returns zero on success, or a non-zero error code on failure.
+*/
+MOONSHINE_EXPORT int32_t moonshine_register_intent(
+    int32_t intent_recognizer_handle, const char *canonical_phrase,
+    float *embedding, uint64_t embedding_size, int32_t priority);
+
+/* Unregisters an intent by its canonical phrase.
+   Returns zero on success, or a non-zero error code on failure.
+*/
+MOONSHINE_EXPORT int32_t moonshine_unregister_intent(
+    int32_t intent_recognizer_handle, const char *canonical_phrase);
+
+/* Synchronously ranks registered intents against `utterance`.
+
+   `tolerance_threshold` is the minimum similarity (0.0–1.0, inclusive) for a
+   candidate to appear in the results.
+
+   On success, returns MOONSHINE_ERROR_NONE, sets `*out_count` to the number
+   of matches (0 to MOONSHINE_INTENT_MAX_MATCHES), and sets `*out_matches` to a
+   heap-allocated array sorted by descending similarity. Each
+   `canonical_phrase` is a separate heap allocation. When `*out_count` is zero,
+   `*out_matches` is set to NULL.
+
+   On failure, returns a non-zero error code and sets `*out_matches` to NULL and
+   `*out_count` to zero.
+
+   Release results with moonshine_free_intent_matches.
+*/
+MOONSHINE_EXPORT int32_t moonshine_get_closest_intents(
+    int32_t intent_recognizer_handle, const char *utterance,
+    float tolerance_threshold, struct moonshine_intent_match_t **out_matches,
+    uint64_t *out_count);
+
+/* Frees an array returned by moonshine_get_closest_intents (safe on NULL /
+   zero count). */
+MOONSHINE_EXPORT void moonshine_free_intent_matches(
+    struct moonshine_intent_match_t *matches, uint64_t count);
+
+/* Gets the number of registered intents.
+   Returns the count on success (>= 0), or a negative error code on failure.
+*/
+MOONSHINE_EXPORT int32_t
+moonshine_get_intent_count(int32_t intent_recognizer_handle);
+
+/* Clears all registered intents.
+   Returns zero on success, or a non-zero error code on failure.
+*/
+MOONSHINE_EXPORT int32_t
+moonshine_clear_intents(int32_t intent_recognizer_handle);
+
+/* Calculates the intent embedding for a given sentence.
+
+   On success, ``*out_embedding`` is set to a heap-allocated array of floats and
+   ``*out_embedding_size`` is set to the number of elements. Release the array
+   with ``moonshine_free_intent_embedding``.
+
+   Returns zero on success, or a non-zero error code on failure.
+*/
+MOONSHINE_EXPORT int32_t moonshine_calculate_intent_embedding(
+    int32_t intent_recognizer_handle, const char *sentence,
+    float **out_embedding, uint64_t *out_embedding_size,
+    const char *model_name);
+
+/* Frees an intent embedding returned by moonshine_calculate_intent_embedding.
+ */
+MOONSHINE_EXPORT void moonshine_free_intent_embedding(float *embedding);
+
 /* ------------------------------ EMBEDDING MODEL --------------------------- */
 
 /* Supported embedding model architectures.                                  */
@@ -853,6 +969,7 @@ MOONSHINE_EXPORT int32_t moonshine_calculate_embedding(
 MOONSHINE_EXPORT void moonshine_free_embedding(float *embedding);
 
 /* Calculates the cosine similarity between two embedding vectors.
+
 
    Both ``embedding_a`` and ``embedding_b`` must have ``embedding_size``
    elements.  The result is written to ``*out_similarity`` and is in the
@@ -1220,6 +1337,27 @@ MOONSHINE_EXPORT int32_t moonshine_phonemes_to_speech(
     const struct moonshine_option_t *options, uint64_t options_count,
     float **out_audio_data, uint64_t *out_audio_data_size,
     int32_t *out_sample_rate);
+
+MOONSHINE_EXPORT int32_t moonshine_tts_supports_streaming(int32_t handle);
+
+typedef bool (*moonshine_tts_stream_callback)(const float *samples,
+                                              uint64_t sample_count,
+                                              int32_t sample_rate_hz,
+                                              bool is_final, void *user_data);
+
+MOONSHINE_EXPORT int32_t moonshine_text_to_speech_stream(
+    int32_t handle, const char *text,
+    const struct moonshine_option_t *options, uint64_t options_count,
+    moonshine_tts_stream_callback on_chunk, void *user_data,
+    int32_t *out_sample_rate_hz);
+
+MOONSHINE_EXPORT int32_t moonshine_session_get_vad_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    int64_t *out_timestamp_ms);
+
+MOONSHINE_EXPORT int32_t moonshine_session_get_diarization_state(
+    int32_t transcriber_handle, int32_t stream_handle, int32_t *out_state,
+    uint8_t out_speaker_id[8], int64_t *out_finalized_at_ms);
 
 /* --------------------------- STREAMING TEXT TO SPEECH -------------------- */
 

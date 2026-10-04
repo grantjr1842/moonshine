@@ -1,6 +1,7 @@
 #ifndef SPELLING_FUSION_DATA_H
 #define SPELLING_FUSION_DATA_H
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>

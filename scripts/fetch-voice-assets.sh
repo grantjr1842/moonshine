@@ -115,6 +115,8 @@ fetch_tiny_streaming_model() {
   if [[ "${pin}" == tiny-streaming-en/* ]]; then
     fetch_cdn "model/${pin}/decoder_kv_with_attention.ort" \
       "${dest}/decoder_kv_with_attention.ort"
+    fetch_cdn "model/tiny-streaming-en/quantized/frontend.ort" \
+      "${dest}/frontend.ort"
   fi
 }
 
